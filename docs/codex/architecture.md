@@ -10,6 +10,7 @@
 | `src/simulation.rs` | `SchoolModel`、`FishSchool`、位置・速度、Boids、矩形障害物、マウスの力 |
 | `src/renderer.rs` | wgpu初期化、サーフェス、GPUバッファ、インスタンス描画、サーフェス再設定 |
 | `src/fish.wgsl` | 魚の形、尾の曲がり、向き、色 |
+| `src/background.wgsl` | 深海グラデーション、淡い拡散光、3層のマリンスノー。魚と同じパスで先に描画 |
 | `src/platform.rs` | OS境界、`Command`、`Environment`、Windows以外のスタブ |
 | `src/windows.rs` | 壁紙配置、アイコン矩形取得、カーソル座標変換、トレイ、単一起動、電源・セッション通知 |
 | `src/settings.rs` | デフォルト値、範囲制限、JSON保存、旧設定の読込 |

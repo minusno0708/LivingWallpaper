@@ -25,6 +25,7 @@ pub struct Renderer {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     pipeline: wgpu::RenderPipeline,
+    background_pipeline: wgpu::RenderPipeline,
     instances: wgpu::Buffer,
     view: wgpu::Buffer,
     bindings: wgpu::BindGroup,
@@ -33,6 +34,17 @@ pub struct Renderer {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn background_shader_is_valid() {
+        let module = naga::front::wgsl::parse_str(include_str!("background.wgsl"))
+            .expect("parse background shader");
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::empty(),
+        )
+        .validate(&module)
+        .expect("validate background shader");
+    }
     #[test]
     fn fish_shader_is_valid() {
         let module =
@@ -133,6 +145,32 @@ impl Renderer {
             bind_group_layouts: &[&layout],
             push_constant_ranges: &[],
         });
+        let background_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("deep sea background"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("background.wgsl").into()),
+        });
+        let background_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("deep sea background"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &background_shader,
+                entry_point: "vs_main",
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &background_shader,
+                entry_point: "fs_main",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+        });
         let attributes = wgpu::vertex_attr_array![0=>Float32x2,1=>Float32x2,2=>Float32,3=>Float32];
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("fish instancing"),
@@ -172,6 +210,7 @@ impl Renderer {
             queue,
             config,
             pipeline,
+            background_pipeline,
             instances,
             view,
             bindings,
@@ -231,6 +270,9 @@ impl Renderer {
                 occlusion_query_set: None,
                 timestamp_writes: None,
             });
+            pass.set_pipeline(&self.background_pipeline);
+            pass.set_bind_group(0, &self.bindings, &[]);
+            pass.draw(0..3, 0..1);
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.bindings, &[]);
             pass.set_vertex_buffer(0, self.instances.slice(..));

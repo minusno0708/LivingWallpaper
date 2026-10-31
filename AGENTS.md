@@ -24,7 +24,7 @@
 ## 実装の境界
 
 - `src/simulation.rs`: OS非依存のモデルとBoids。`SchoolModel` は現状 `Fish` を返すため、完全にモデル中立な描画契約ではない。
-- `src/renderer.rs`, `src/fish.wgsl`: wgpuによる魚のインスタンス描画。シミュレーションはCPU、描画はGPU。
+- `src/renderer.rs`, `src/fish.wgsl`, `src/background.wgsl`: wgpuによる魚のインスタンス描画と深海・マリンスノーの背景描画。シミュレーションはCPU、描画はGPU。
 - `src/platform.rs`, `src/windows.rs`: OS境界とWindows連携。Windows依存を共通シミュレーションへ持ち込まない。
 - `src/settings.rs`: 設定の範囲制限・保存。新設定がない場合の旧 `FishSchoolWallpaper` 設定読込を維持する。
 - `src/main.rs`: イベントループ、描画制限、マウス入力、停止・復帰制御。
