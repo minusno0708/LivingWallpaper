@@ -37,3 +37,11 @@ GPUの起動テストでは約8秒間のフレーム送信と終了を確認す�
 - RustとWGSLのアプリ実装は変更していない。GUI・実壁紙の再起動検証は行っていない。
 - 新しいビルドスクリプトのMSVC CI実行は、この再構成時点では未実施。
 - 端末情報・個人情報の補足は `docs/local/` に分離し、`git check-ignore` と追跡対象の一覧でGitから除外されていることを確認した。共有用の資料は `docs/codex/` に置く。
+
+## 高解像度の壁紙で起動時に終了する問題
+
+`Surface::configure` が `maximum extent is 2048` でpanicする原因は、GPUの実際の能力ではなく、デバイス作成時に `Limits::downlevel_defaults()` のテクスチャ上限をそのまま要求していたこと。小さいプレビューは起動できても、2048pxを超える壁紙では失敗する。
+
+修正では `using_resolution(adapter.limits())` で解像度上限をGPUの対応値に合わせ、他の制限は従来の保守的な値を維持する。初回のSurface設定前に実際のデバイス上限を確認し、非対応の解像度ならpanicではなく通常の起動エラーとして返す。別PCでの壁紙・トレイ表示は修正版で再確認が必要。
+
+2026-10-31: 修正後にGNUツールチェーンで `cargo fmt --check`、`cargo test --locked`（5件成功・1件ignore）、`cargo build --release --locked` が成功。配布用のパス検査付きビルドはGitHub Actionsで別途実行する。報告元PCでの再実行、MSVCビルド、高解像度Surfaceの実機描画は未検証。

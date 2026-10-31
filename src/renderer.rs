@@ -68,7 +68,10 @@ impl Renderer {
                 &wgpu::DeviceDescriptor {
                     label: Some("Fish GPU"),
                     required_features: wgpu::Features::empty(),
-                    required_limits: wgpu::Limits::downlevel_defaults(),
+                    // Keep conservative buffer limits, but allow surfaces up to the GPU's
+                    // texture resolution (downlevel defaults cap this at 2048).
+                    required_limits: wgpu::Limits::downlevel_defaults()
+                        .using_resolution(adapter.limits()),
                 },
                 None,
             )
@@ -85,6 +88,14 @@ impl Renderer {
             config.present_mode = wgpu::PresentMode::Mailbox;
         }
         config.desired_maximum_frame_latency = 1;
+        anyhow::ensure!(
+            config.width <= device.limits().max_texture_dimension_2d
+                && config.height <= device.limits().max_texture_dimension_2d,
+            "Wallpaper size {}x{} exceeds the GPU texture limit {}",
+            config.width,
+            config.height,
+            device.limits().max_texture_dimension_2d
+        );
         surface.configure(&device, &config);
         let view = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("view"),
