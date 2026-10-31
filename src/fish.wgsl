@@ -38,6 +38,6 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
     let edge=max(fwidth(distance),0.008);
     let alpha=1.-smoothstep(-edge,edge,distance);
     if alpha<0.03 { discard; }
-    let color=mix(vec3(0.43,0.72,0.73),vec3(0.55,0.81,0.80),in.hue);
+    let color=mix(vec3(0.15,0.35,0.57),vec3(0.26,0.51,0.72),in.hue);
     return vec4(color,alpha);
 }
