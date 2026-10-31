@@ -1,0 +1,27 @@
+name: Windows
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check local-only documentation is untracked
+        shell: pwsh
+        run: |
+          $localFiles = @(git ls-files -- docs/local)
+          if ($localFiles.Count -ne 0) { throw 'docs/local must not be tracked or published.' }
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --check
+      - run: .\build.ps1
+        shell: pwsh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: living-wallpaper-windows-x64
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14

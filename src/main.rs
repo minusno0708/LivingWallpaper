@@ -1,0 +1,162 @@
+#![cfg_attr(
+    all(windows, not(debug_assertions), not(test)),
+    windows_subsystem = "windows"
+)]
+mod platform;
+mod renderer;
+mod settings;
+mod simulation;
+use anyhow::Context;
+use glam::Vec2;
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use simulation::{Pointer, SchoolModel};
+use std::{
+    io::Write,
+    sync::{mpsc, Arc, Mutex},
+    time::{Duration, Instant},
+};
+use winit::{
+    event::{ElementState, Event, WindowEvent},
+    event_loop::{ControlFlow, EventLoop},
+    keyboard::{Key, NamedKey},
+    window::WindowBuilder,
+};
+
+fn log(message: impl AsRef<str>) {
+    let base = std::env::var_os("LOCALAPPDATA")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("LivingWallpaper");
+    let _ = std::fs::create_dir_all(&base);
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(base.join("app.log"))
+    {
+        let _ = writeln!(f, "{:?} {}", std::time::SystemTime::now(), message.as_ref());
+    }
+}
+fn main() {
+    std::panic::set_hook(Box::new(|info| {
+        log(format!("PANIC {info}"));
+    }));
+    if let Err(error) = run() {
+        log(format!("ERROR {error:#}"));
+        eprintln!("{error:#}");
+        #[cfg(windows)]
+        if !std::env::args().any(|a| a == "--smoke-test") {
+            unsafe {
+                use windows_sys::Win32::UI::WindowsAndMessaging::*;
+                let message:Vec<u16>=format!("{error:#}\n\nTry --preview to test rendering. Log: %LOCALAPPDATA%\\LivingWallpaper\\app.log").encode_utf16().chain(Some(0)).collect();
+                let title: Vec<u16> = "Living Wallpaper".encode_utf16().chain(Some(0)).collect();
+                MessageBoxW(0, message.as_ptr(), title.as_ptr(), MB_OK | MB_ICONERROR);
+            }
+        }
+        std::process::exit(1);
+    }
+}
+fn run() -> anyhow::Result<()> {
+    let _instance = platform::single_instance()?;
+    let args: Vec<_> = std::env::args().collect();
+    let preview = args.iter().any(|a| a == "--preview");
+    let smoke = args.iter().any(|a| a == "--smoke-test");
+    let event_loop = EventLoop::new()?;
+    let mut builder = WindowBuilder::new()
+        .with_title("Living Wallpaper")
+        .with_inner_size(winit::dpi::PhysicalSize::new(1100, 700));
+    if !preview {
+        builder = builder.with_decorations(false).with_visible(false);
+    }
+    let window = Arc::new(builder.build(&event_loop)?);
+    let hwnd = match window.window_handle()?.as_raw() {
+        RawWindowHandle::Win32(h) => h.hwnd.get(),
+        _ => 0,
+    };
+    if !preview {
+        platform::attach(hwnd).context("Windows wallpaper integration failed")?;
+    }
+    let mut renderer = pollster::block_on(renderer::Renderer::new(window.clone()))?;
+    log(format!(
+        "START preview={preview} GPU={}",
+        renderer.adapter_name
+    ));
+    let settings = Arc::new(Mutex::new(settings::Settings::load()));
+    let (tx, rx) = mpsc::channel();
+    let _tray = platform::start_tray(tx, settings.clone())?;
+    let mut model: Box<dyn SchoolModel> = Box::<simulation::FishSchool>::default();
+    let mut pointer = Pointer::default();
+    let mut previous_cursor = None;
+    let mut obstacles = Vec::new();
+    let mut last_icons = Instant::now() - Duration::from_secs(3);
+    let start = Instant::now();
+    let mut last_frame = Instant::now();
+    let mut next_frame = Instant::now();
+    let mut last_health = Instant::now();
+    let mut frames = 0u64;
+    let mut last_icon_error = String::new();
+    let smoke_frames = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let smoke_result = smoke_frames.clone();
+    event_loop.run(move |event,target| {
+        if let Event::WindowEvent { window_id,event }=&event { if *window_id==window.id() {
+            match event {
+                WindowEvent::CloseRequested=>target.exit(),
+                WindowEvent::Resized(s)=>renderer.resize(s.width,s.height),
+                WindowEvent::KeyboardInput { event,.. } if event.state==ElementState::Pressed && event.logical_key==Key::Named(NamedKey::Escape)=>target.exit(),
+                _=>{}
+            }
+        }}
+        if let Event::AboutToWait=event {
+            let now=Instant::now();
+            for command in rx.try_iter() {
+                use platform::Command::*; let mut s=settings.lock().unwrap();
+                match command { Pause=>s.paused=!s.paused,Mouse=>s.mouse=!s.mouse,Icons=>s.icons=!s.icons,Power=>s.power_saving=!s.power_saving,Count(n)=>s.fish_count=n,Fps(n)=>s.fps=n,Quit=>target.exit() }
+                if let Err(e)=s.save() { log(format!("Settings save failed: {e}")); }
+                next_frame=now;
+            }
+            if smoke && start.elapsed()>Duration::from_secs(8) { smoke_frames.store(frames,std::sync::atomic::Ordering::Relaxed); log(format!("SMOKE {} frames={frames} icons={} GPU={}",if frames>0 {"PASS"} else {"FAIL"},obstacles.len(),renderer.adapter_name)); target.exit(); }
+            if !preview && last_health.elapsed()>Duration::from_secs(2) {
+                last_health=now;
+                if !platform::healthy(hwnd) { log("Explorer wallpaper host lost; exiting. Restart app after Explorer is ready."); target.exit(); }
+            }
+            let s=settings.lock().unwrap().clone();
+            if now>=next_frame {
+                let size=window.inner_size(); let bounds=Vec2::new(size.width as f32,size.height as f32);
+                let env=platform::environment(hwnd);
+                let paused=s.paused || size.width==0 || size.height==0 || (s.power_saving && (env.suspended || (!preview && env.fullscreen)));
+                let fps=if paused {2} else if s.power_saving && env.battery {s.fps.min(15)} else {s.fps};
+                let dt=now.duration_since(last_frame).as_secs_f32(); last_frame=now;
+                if let Some(cursor)=env.cursor {
+                    let distance=previous_cursor.map(|p:Vec2| p.distance(cursor)).unwrap_or(0.0);
+                    pointer.speed=distance/dt.max(0.001);
+                    pointer.still_seconds=if distance<2.0 {pointer.still_seconds+dt.min(0.5)} else {0.0};
+                    pointer.position=cursor; previous_cursor=Some(cursor);
+                    pointer.enabled=s.mouse && cursor.cmpge(Vec2::ZERO).all() && cursor.cmple(bounds).all();
+                } else { pointer.enabled=false; }
+                if !paused {
+                    if s.icons && !preview && last_icons.elapsed()>Duration::from_secs(2) {
+                        last_icons=now;
+                        match platform::icons(hwnd) { Ok(rects)=>{ obstacles=rects; },Err(e)=>{obstacles.clear();let message=e.to_string();if message!=last_icon_error {log(format!("Icon avoidance unavailable: {message}"));last_icon_error=message;} } }
+                    }
+                    model.resize_population(s.fish_count,bounds);
+                    let elapsed=dt.min(0.10); let steps=(elapsed/(1.0/60.0)).ceil().max(1.0) as u32;
+                    for _ in 0..steps { model.step(elapsed/steps as f32,bounds,if s.icons {&obstacles} else {&[]},pointer); }
+                    match renderer.render(model.fish(),start.elapsed().as_secs_f32()) {
+                        Ok(())=>frames+=1,
+                        Err(wgpu::SurfaceError::Lost|wgpu::SurfaceError::Outdated)=>renderer.resize(size.width,size.height),
+                        Err(wgpu::SurfaceError::OutOfMemory)=>{log("GPU out of memory");target.exit();},
+                        Err(wgpu::SurfaceError::Timeout)=>{},
+                    }
+                }
+                next_frame=Instant::now()+Duration::from_secs_f64(1.0/fps as f64);
+            }
+            // Bounded wait also delivers settings sent by the tray's native message thread.
+            target.set_control_flow(ControlFlow::WaitUntil(next_frame.min(now+Duration::from_millis(100))));
+        }
+        if let Event::LoopExiting=event { log(format!("STOP frames={frames}")); }
+    })?;
+    anyhow::ensure!(
+        !smoke || smoke_result.load(std::sync::atomic::Ordering::Relaxed) > 0,
+        "Smoke test produced no frames"
+    );
+    Ok(())
+}

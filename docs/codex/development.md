@@ -1,0 +1,85 @@
+# 別PCでの開発・検証
+
+## 取得とCodexの起点
+
+```powershell
+git clone <repository-url> living-wallpaper
+cd living-wallpaper
+git status --short --branch
+```
+
+取得先への認証が必要な場合は、各マシンで用意する。プロジェクトに認証情報を保存しない。
+
+cloneした `Cargo.toml` と `AGENTS.md` のあるフォルダーをCodexのプロジェクトとして開く。ルートの `AGENTS.md` とこの資料群がGitに含まれるため、過去のチャットや元PCの絶対パスは不要。独自設定で別の指示ファイルが優先される場合は、実際の読込対象を確認する。
+
+## Windowsの推奨環境
+
+- Windows 11 x64。
+- Rust stableの `x86_64-pc-windows-msvc`、rustfmt。
+- Visual Studio 2022以降またはBuild Toolsの「C++によるデスクトップ開発」とWindows 11 SDK。
+- wgpuが利用できるGPUとドライバー。GPU未接続のCIでGUI検証は行わない。
+
+MSVCのリンカーが見つからない場合はDeveloper PowerShell等の環境設定とSDKの導入を確認する。依存パッケージは `Cargo.lock` に固定してあり、初回はダウンロードが必要。取得済みなら `--offline --locked` も利用できる。
+
+```powershell
+cargo fmt --check
+cargo test --locked
+cargo build --release --locked
+```
+
+基本の配布作成は `powershell -File ./build.ps1`。このスクリプトはテストとReleaseビルドに加え、コンパイラーのパス置換とEXEのローカルパス残存検査を行う。成功した場合だけ `dist/` に実行ファイル、README、ライセンス類をコピーする。Codex資料は含めない。通常の `cargo build` の生成物をそのまま公開しない。
+
+既存の `dist/` がある場合は別の場所に保管してから実行する。`RUSTFLAGS` を使っている場合は引数境界の誤解釈を避けるため、設定を `CARGO_ENCODED_RUSTFLAGS` または `-AdditionalRustFlags` に移して `RUSTFLAGS` を未設定にする。元の環境変数はビルド後に復元される。
+
+`CARGO_TARGET_DIR` を指定した場合はその出力先から実行ファイルを取得する。相対値はプロジェクトルートを起点に考え、マシン固有の設定は環境変数等で与える。元PCで使ったリポジトリ外の `work/` ツールチェーンを必要条件にしない。
+
+## GNU環境を使う場合
+
+当初のローカル検証はRust 1.99.1 GNUとLLVM-MinGW 20260616で実施した。MSVCの代替例であり、全マシンにこの構成を強制するものではない。
+
+```powershell
+rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal
+$env:PATH = 'C:\build-tools\llvm-mingw\bin;' + $env:PATH
+$env:CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER = 'C:\build-tools\llvm-mingw\bin\x86_64-w64-mingw32-gcc.exe'
+$env:RUSTFLAGS = $null
+./build.ps1 -Toolchain stable-x86_64-pc-windows-gnu -AdditionalRustFlags @('-C', 'link-self-contained=yes')
+```
+
+上記のツールのパスは置換する。古いGNUリンカーとLLVMのimport libraryを混在させると、過去の環境ではRust起動時にDEP違反となった。コマンドがビルド成功しても実行できるか確認する。詳細は [validation.md](validation.md)。
+
+## 実行・手動確認
+
+```powershell
+./target/release/living-wallpaper.exe --preview
+./target/release/living-wallpaper.exe --preview --smoke-test
+./target/release/living-wallpaper.exe --smoke-test
+./target/release/living-wallpaper.exe
+```
+
+`CARGO_TARGET_DIR` を変更している場合は実行パスを合わせる。`--smoke-test` は約8秒で終了し、フレームが1枚も描画されなければ失敗する。実壁紙モードではデスクトップ背景を一時的に変えるため、作業環境に合わせて実行する。
+
+手動の受入確認は [requirements.md](requirements.md) の末尾と [validation.md](validation.md) の未確認項目を使う。トレイの項目を変更した場合は、終了・再起動後の設定反映も確認する。アイコンやマウスは実操作、バッテリー・ロック・スリープは対象PCの状態切替で確認する。
+
+マウスや電源状態の実機テストをしていない場合、コード上の分岐があることを根拠に合格としない。
+
+## テストの範囲
+
+- 設定の範囲制限と旧設定の引継ぎ、新設定の優先。
+- マウス接近・逃避・OFFの力。
+- 群泳の継続時の数値の有限性、範囲内保持、障害物への非侵入。
+- WGSLの構文・意味検査。
+- シミュレーション性能測定は通常のテストではignore。必要な場合のみ次を実行する。
+
+```powershell
+cargo test --release --locked simulation_benchmark -- --ignored --nocapture
+```
+
+通常は5件成功・性能測定1件ignoreが名称変更後の基準。テストを追加したら件数・記録を更新する。
+
+## CIと配布
+
+`.github/workflows/windows.yml` はWindows上でrustfmt、パス置換とEXE検査を行う `build.ps1`、配布Artifactsの保存を実行する。CIでのビルド成功とGUI・壁紙の動作確認は別。実行ファイルとライセンスは配布し、`AGENTS.md`、`docs/codex/`、ローカル設定やログはランタイム配布へ含めない。
+
+`--remap-path-prefix` の文字列置換はベストエフォートであり、リンカーや生成コードが作ったパスをすべて除く保証はない。そのためビルド後のバイト検査も行う。PDBやCargoの中間ファイルは配布しない。参考: [Rustのパス置換](https://doc.rust-lang.org/rustc/remap-source-paths.html)、[Cargoの環境変数](https://doc.rust-lang.org/cargo/reference/environment-variables.html)。
+
+手元の検証結果を [validation.md](validation.md) に日付、対象コミット、OS・GPU、ツールチェーン、実行コマンド、成功・失敗、実行していない項目とともに追記する。
