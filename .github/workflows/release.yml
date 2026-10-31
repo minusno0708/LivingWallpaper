@@ -1,0 +1,53 @@
+name: Windows Release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-release-${{ github.event.release.id }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Check local-only documentation is untracked
+        run: |
+          $localFiles = @(git ls-files -- docs/local)
+          if ($localFiles.Count -ne 0) { throw 'docs/local must not be tracked or published.' }
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable-x86_64-pc-windows-msvc
+          components: rustfmt
+      - name: Check formatting
+        run: cargo fmt --check
+      - name: Test, build and inspect executable
+        run: .\build.ps1 -Toolchain stable-x86_64-pc-windows-msvc
+      - name: Package Windows executable and licenses
+        run: |
+          if (-not (Test-Path -LiteralPath 'dist/living-wallpaper.exe' -PathType Leaf)) {
+            throw 'Distribution executable is missing.'
+          }
+          Compress-Archive -Path dist/* -DestinationPath living-wallpaper-windows-x64.zip
+      - name: Attach ZIP to published release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          gh release upload "$env:RELEASE_TAG" living-wallpaper-windows-x64.zip --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'Release asset upload failed.' }

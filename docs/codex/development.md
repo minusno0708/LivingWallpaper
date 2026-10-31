@@ -83,3 +83,20 @@ cargo test --release --locked simulation_benchmark -- --ignored --nocapture
 `--remap-path-prefix` の文字列置換はベストエフォートであり、リンカーや生成コードが作ったパスをすべて除く保証はない。そのためビルド後のバイト検査も行う。PDBやCargoの中間ファイルは配布しない。参考: [Rustのパス置換](https://doc.rust-lang.org/rustc/remap-source-paths.html)、[Cargoの環境変数](https://doc.rust-lang.org/cargo/reference/environment-variables.html)。
 
 手元の検証結果を [validation.md](validation.md) に日付、対象コミット、OS・GPU、ツールチェーン、実行コマンド、成功・失敗、実行していない項目とともに追記する。
+
+## GitHub Releasesへの自動配布
+
+`.github/workflows/release.yml` は、GitHubのReleaseを **Publish release** したときに起動する。正式版とプレリリースの両方が対象。下書き保存やタグのpushだけでは起動しない。
+
+1. このワークフローを含むコミットを `main` にpushする。
+2. GitHubのReleases → Draft a new releaseで、そのコミット以降を指すタグ（例: `v0.1.0`）を選ぶ／作成する。
+3. Publish releaseを押し、Actionsの **Windows Release** の完了を待つ。
+4. ReleaseのAssetsに `living-wallpaper-windows-x64.zip` が添付される。
+
+Releaseのタグが指すコミットをWindows x64 MSVCで整形確認・テスト・Releaseビルドする。既存の `build.ps1` によるパス置換・残存検査を通し、`dist/` の内容のみをZIPにする。ZIP直下に `living-wallpaper.exe`、README、ライセンス類が入る。Rustやビルドツールは利用者側には不要。GPU・壁紙の実動作はCIでは確認しない。
+
+認証にはGitHub標準の `GITHUB_TOKEN` とジョブの `contents: write` を使う。PAT等の追加Secretは不要。ビルドや検査に失敗した場合はZIPを添付せずActionsを失敗させる。公開直後からビルド完了まではAssetsに実行用ZIPがない。失敗後は同じActions実行を再実行でき、同名ZIPは置換する。ソースの修正が必要なら修正コミットで新しいタグ・Releaseを作る。
+
+公開後のAsset追加を禁止するimmutable releases設定とは併用しない。その設定を使用する場合は、下書きへの添付後に公開する別フローが必要。GitHub標準のSource code ZIPはソース配布であり、この実行用ZIPとは異なる。署名・インストーラー・macOS/ARM64向け配布は対象外。
+
+仕様参照: [Releaseイベント](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#release)、[gh release upload](https://cli.github.com/manual/gh_release_upload)。
