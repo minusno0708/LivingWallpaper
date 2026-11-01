@@ -74,7 +74,7 @@ $env:RUSTFLAGS = $null
 cargo test --release --locked simulation_benchmark -- --ignored --nocapture
 ```
 
-Windowsでは通常23件成功・性能測定1件ignoreが現在の基準（魚・背景のWGSL検証、孤立個体の復帰・速度上限を含む）。テストを追加したら件数・記録を更新する。
+Windowsでは通常29件成功・性能測定1件ignoreが現在の基準（魚・背景のWGSL検証、孤立個体の復帰・速度上限を含む）。テストを追加したら件数・記録を更新する。
 
 ## CIと配布
 
@@ -100,3 +100,10 @@ Releaseのタグが指すコミットをWindows x64 MSVCで整形確認・テス
 公開後のAsset追加を禁止するimmutable releases設定とは併用しない。その設定を使用する場合は、下書きへの添付後に公開する別フローが必要。GitHub標準のSource code ZIPはソース配布であり、この実行用ZIPとは異なる。署名・インストーラー・macOS/ARM64向け配布は対象外。
 
 仕様参照: [Releaseイベント](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#release)、[gh release upload](https://cli.github.com/manual/gh_release_upload)。
+
+
+## リソースとREADMEのサンプル
+
+アイコンはbuild.rsからassets/app.rcをコンパイルする。MSVCはWindows SDKのrc.exe、GNUはwindresを必要とする（WINDRESで指定可）。フォントとそのライセンス、ICOを取得済みのソースへ同梱し、実行時にダウンロードしない。
+
+READMEのassets/demo.gifは現行のsimulation.rs・fish.wgsl・background.wgslを使ったオフスクリーン描画を縮小・減色したもの。デスクトップや個人設定を含めない。背景・魚の表現を変更したときに更新し、生成条件・検証結果をvalidation.mdへ追記する。実壁紙・モニター統合の受入確認には使わない。

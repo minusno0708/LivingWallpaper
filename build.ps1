@@ -74,6 +74,8 @@ try {
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination $dist
     }
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'third-party-licenses') -Destination $dist -Recurse
+    New-Item -ItemType Directory -Path (Join-Path $dist 'assets') | Out-Null
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'assets/demo.gif') -Destination (Join-Path $dist 'assets/demo.gif')
     Write-Host 'Built and checked: dist\living-wallpaper.exe'
 } finally {
     $env:CARGO_ENCODED_RUSTFLAGS = $previousEncodedFlags
