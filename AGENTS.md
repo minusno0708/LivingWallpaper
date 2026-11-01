@@ -60,3 +60,5 @@ cargo build --release --locked
 ## Git
 
 通常のブランチは `main`。送信先は `git remote -v` で確認し、アカウント名や認証情報をソースへ固定しない。作業開始時に未コミット変更を確認し、ユーザーの変更を保護する。公開するコミット情報・ソース・配布物に個人情報を含めない。`docs/codex/git-setup.md` を参照する。
+
+モニターは初期状態で全画面有効、Windowsの配置に沿った共通シーンとして接続する。設定のdisabled_displaysで個別に除外し、空白・除外領域は常時回避する。単一Surfaceの寸法制限と実機の複数画面未検証の区分はdocs/codex/status.mdを参照。

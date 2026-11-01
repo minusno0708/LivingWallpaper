@@ -98,27 +98,15 @@ pub fn attach(hwnd: isize) -> anyhow::Result<()> {
             "SetParent failed: {}",
             GetLastError()
         );
-        // MVP targets the primary display, including a nonzero virtual-desktop origin.
-        let monitor = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY);
-        let mut info: MONITORINFO = zeroed();
-        info.cbSize = size_of::<MONITORINFO>() as u32;
-        GetMonitorInfoW(monitor, &mut info);
-        let mut origin = POINT {
-            x: info.rcMonitor.left,
-            y: info.rcMonitor.top,
-        };
-        ScreenToClient(parent, &mut origin);
-        ensure!(
-            SetWindowPos(
-                hwnd,
-                after,
-                origin.x,
-                origin.y,
-                info.rcMonitor.right - info.rcMonitor.left,
-                info.rcMonitor.bottom - info.rcMonitor.top,
-                SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_FRAMECHANGED
-            ) != 0,
-            "SetWindowPos failed"
+        configure_displays(hwnd, &[])?;
+        SetWindowPos(
+            hwnd,
+            after,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
         );
         crate::log(format!(
             "Wallpaper attached modern={modern} parent={parent:#x} after={after:#x}"
@@ -460,6 +448,7 @@ struct TrayContext {
     icon: NOTIFYICONDATAW,
     taskbar: u32,
     font: HFONT,
+    display_ids: Vec<String>,
     last_count: usize,
     last_fps: u32,
     last_time_scale: f32,
@@ -502,6 +491,38 @@ unsafe fn layout_panel(hwnd: HWND, context: &mut TrayContext) {
         };
         SendMessageW(child, WM_SETFONT, font as usize, 1);
     }
+    for (index, _) in context.display_ids.iter().enumerate() {
+        let child = GetDlgItem(hwnd, 2000 + index as i32);
+        SetWindowPos(
+            child,
+            0,
+            scale(20),
+            scale(520 + index as i32 * 36),
+            scale(300),
+            scale(32),
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+        SendMessageW(child, WM_SETFONT, new_font as usize, 0);
+    }
+    SetWindowPos(
+        GetDlgItem(hwnd, 1999),
+        0,
+        scale(20),
+        scale(480),
+        scale(300),
+        scale(28),
+        SWP_NOZORDER | SWP_NOACTIVATE,
+    );
+    SendMessageW(GetDlgItem(hwnd, 1999), WM_SETFONT, new_font as usize, 0);
+    SetWindowPos(
+        GetDlgItem(hwnd, QUIT_ID),
+        0,
+        scale(20),
+        scale(524 + context.display_ids.len() as i32 * 36),
+        scale(100),
+        scale(28),
+        SWP_NOZORDER | SWP_NOACTIVATE,
+    );
     let old_font = context.font;
     context.font = new_font;
     if old_font != 0 {
@@ -511,7 +532,7 @@ unsafe fn layout_panel(hwnd: HWND, context: &mut TrayContext) {
         left: 0,
         top: 0,
         right: scale(340),
-        bottom: scale(518),
+        bottom: scale(566 + context.display_ids.len() as i32 * 36),
     };
     AdjustWindowRectExForDpi(&mut rect, PANEL_STYLE, 0, PANEL_EXSTYLE, dpi);
     SetWindowPos(
@@ -555,6 +576,58 @@ unsafe fn create_panel_controls(hwnd: HWND, module: HINSTANCE) -> bool {
     true
 }
 unsafe fn refresh_panel(hwnd: HWND, context: &mut TrayContext) {
+    // Recreate labels on open so newly connected displays appear too.
+    let current = displays();
+    context.display_ids = current.iter().map(|d| d.id.clone()).collect();
+    if GetDlgItem(hwnd, 1999) == 0 {
+        let label = CreateWindowExW(
+            0,
+            wide("STATIC").as_ptr(),
+            wide("モニター").as_ptr(),
+            WS_CHILD | WS_VISIBLE,
+            0,
+            0,
+            0,
+            0,
+            hwnd,
+            1999,
+            GetModuleHandleW(null()),
+            null(),
+        );
+        panel::install(label, 1999);
+    }
+    for index in 0..64 {
+        let old = GetDlgItem(hwnd, 2000 + index);
+        if old != 0 {
+            DestroyWindow(old);
+        }
+    }
+    let settings = context.settings.lock().unwrap().clone();
+    for (index, d) in current.iter().enumerate() {
+        let label = d.name.clone();
+        let child = CreateWindowExW(
+            0,
+            wide("BUTTON").as_ptr(),
+            wide(&label).as_ptr(),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
+            0,
+            0,
+            0,
+            0,
+            hwnd,
+            (2000 + index) as isize,
+            GetModuleHandleW(null()),
+            null(),
+        );
+        panel::install(child, 2000 + index as i32);
+        SendMessageW(
+            child,
+            BM_SETCHECK,
+            usize::from(!settings.disabled_displays.contains(&d.id)),
+            0,
+        );
+    }
+    layout_panel(hwnd, context);
     let s = context.settings.lock().unwrap().clone();
     for (id, checked) in [(1002, s.mouse), (1003, s.icons), (1004, s.power_saving)] {
         SendMessageW(GetDlgItem(hwnd, id), BM_SETCHECK, usize::from(checked), 0);
@@ -782,6 +855,15 @@ unsafe extern "system" fn tray_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) 
                 ShowWindow(hwnd, SW_HIDE);
                 return 0;
             }
+            if (2000..2064).contains(&id) && notice == BN_CLICKED {
+                let child = GetDlgItem(hwnd, id);
+                let checked = SendMessageW(child, BM_GETCHECK, 0, 0) != 0;
+                SendMessageW(child, BM_SETCHECK, usize::from(!checked), 0);
+                if let Some(display_id) = context.display_ids.get((id - 2000) as usize) {
+                    let _ = context.tx.send(Command::Monitor(display_id.clone()));
+                }
+                return 0;
+            }
             if (1002..=1004).contains(&id) && notice == BN_CLICKED {
                 let control = GetDlgItem(hwnd, id);
                 let checked = SendMessageW(control, BM_GETCHECK, 0, 0) != 0;
@@ -885,6 +967,7 @@ pub fn start_tray(
             icon,
             taskbar: RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()),
             font: 0,
+            display_ids: vec![],
             last_count: 0,
             last_fps: 0,
             last_time_scale: 0.0,
@@ -971,6 +1054,7 @@ mod panel_tests {
                 icon: zeroed(),
                 taskbar: WM_APP + 200,
                 font: 0,
+                display_ids: vec![],
                 last_count: 0,
                 last_fps: 0,
                 last_time_scale: 0.0,
@@ -991,6 +1075,14 @@ mod panel_tests {
             SelectObject(dc, old);
             ReleaseDC(hwnd, dc);
             assert_eq!(slider_values(hwnd), (330, 30));
+            if let Some(id) = context.display_ids.first().cloned() {
+                let control = GetDlgItem(hwnd, 2000);
+                assert_ne!(control, 0);
+                SendMessageW(hwnd, WM_COMMAND, 2000, control);
+                assert!(matches!(rx.try_recv(),Ok(Command::Monitor(value)) if value==id));
+                assert_eq!(SendMessageW(control, BM_GETCHECK, 0, 0), 0);
+            }
+
             assert_ne!(GetDlgItem(hwnd, panel::CLOSE_ID), 0);
             assert_eq!(GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_CAPTION as isize, 0);
             SendMessageW(
@@ -1128,4 +1220,167 @@ mod panel_tests {
             UnregisterClassW(class.as_ptr(), module);
         }
     }
+}
+
+unsafe extern "system" fn enumerate_display(
+    monitor: HMONITOR,
+    _: HDC,
+    _: *mut RECT,
+    data: LPARAM,
+) -> BOOL {
+    let mut info: MONITORINFOEXW = zeroed();
+    info.monitorInfo.cbSize = size_of::<MONITORINFOEXW>() as u32;
+    if GetMonitorInfoW(monitor, &mut info as *mut _ as *mut MONITORINFO) != 0 {
+        let end = info
+            .szDevice
+            .iter()
+            .position(|&v| v == 0)
+            .unwrap_or(info.szDevice.len());
+        let r = info.monitorInfo.rcMonitor;
+        (*(data as *mut Vec<Display>)).push(Display {
+            id: String::from_utf16_lossy(&info.szDevice[..end]),
+            name: String::from_utf16_lossy(&info.szDevice[..end]),
+            x: r.left,
+            y: r.top,
+            width: r.right - r.left,
+            height: r.bottom - r.top,
+        });
+    }
+    1
+}
+pub fn displays() -> Vec<Display> {
+    let mut result: Vec<Display> = Vec::new();
+    unsafe {
+        EnumDisplayMonitors(
+            0,
+            null(),
+            Some(enumerate_display),
+            &mut result as *mut _ as isize,
+        );
+    }
+    let names = display_names();
+    for display in &mut result {
+        if let Some((_, name)) = names.iter().find(|(id, _)| id == &display.id) {
+            display.name = name.clone();
+        }
+    }
+    result.sort_by(|a, b| a.id.cmp(&b.id));
+    result
+}
+pub fn configure_displays(hwnd: isize, disabled: &[String]) -> anyhow::Result<Vec<Obstacle>> {
+    let displays = displays();
+    ensure!(!displays.is_empty(), "No active displays found");
+    let left = displays.iter().map(|d| d.x).min().unwrap();
+    let top = displays.iter().map(|d| d.y).min().unwrap();
+    let right = displays.iter().map(|d| d.x + d.width).max().unwrap();
+    let bottom = displays.iter().map(|d| d.y + d.height).max().unwrap();
+    let active: Vec<_> = displays
+        .iter()
+        .filter(|d| !disabled.contains(&d.id))
+        .collect();
+    unsafe {
+        let parent = GetParent(hwnd);
+        let mut point = POINT { x: left, y: top };
+        ScreenToClient(parent, &mut point);
+        ensure!(
+            SetWindowPos(
+                hwnd,
+                0,
+                point.x,
+                point.y,
+                right - left,
+                bottom - top,
+                SWP_NOZORDER | SWP_NOACTIVATE
+            ) != 0,
+            "Could not resize virtual wallpaper"
+        );
+        let region = CreateRectRgn(0, 0, 0, 0);
+        for d in &active {
+            let part = CreateRectRgn(
+                d.x - left,
+                d.y - top,
+                d.x + d.width - left,
+                d.y + d.height - top,
+            );
+            CombineRgn(region, region, part, RGN_OR);
+            DeleteObject(part);
+        }
+        if SetWindowRgn(hwnd, region, 1) == 0 {
+            DeleteObject(region);
+            bail!("Could not set display visibility");
+        }
+        ShowWindow(
+            hwnd,
+            if active.is_empty() {
+                SW_HIDE
+            } else {
+                SW_SHOWNOACTIVATE
+            },
+        );
+    }
+    Ok(super::display_gaps(&displays, disabled))
+}
+
+fn display_names() -> Vec<(String, String)> {
+    use windows_sys::Win32::Devices::Display::*;
+    let decode = |s: &[u16]| {
+        String::from_utf16_lossy(&s[..s.iter().position(|&c| c == 0).unwrap_or(s.len())])
+    };
+    unsafe {
+        // Hotplug can change buffer requirements between the two calls.
+        for _ in 0..3 {
+            let (mut paths_count, mut modes_count) = (0, 0);
+            if GetDisplayConfigBufferSizes(
+                QDC_ONLY_ACTIVE_PATHS,
+                &mut paths_count,
+                &mut modes_count,
+            ) != 0
+            {
+                break;
+            }
+            let mut paths: Vec<DISPLAYCONFIG_PATH_INFO> = vec![zeroed(); paths_count as usize];
+            let mut modes: Vec<DISPLAYCONFIG_MODE_INFO> = vec![zeroed(); modes_count as usize];
+            let error = QueryDisplayConfig(
+                QDC_ONLY_ACTIVE_PATHS,
+                &mut paths_count,
+                paths.as_mut_ptr(),
+                &mut modes_count,
+                modes.as_mut_ptr(),
+                null_mut(),
+            );
+            if error == ERROR_INSUFFICIENT_BUFFER {
+                continue;
+            }
+            if error != 0 {
+                break;
+            }
+            let mut names = Vec::new();
+            for path in paths.iter().take(paths_count as usize) {
+                let mut source: DISPLAYCONFIG_SOURCE_DEVICE_NAME = zeroed();
+                source.header = DISPLAYCONFIG_DEVICE_INFO_HEADER {
+                    r#type: DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
+                    size: size_of::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>() as u32,
+                    adapterId: path.sourceInfo.adapterId,
+                    id: path.sourceInfo.id,
+                };
+                let mut target: DISPLAYCONFIG_TARGET_DEVICE_NAME = zeroed();
+                target.header = DISPLAYCONFIG_DEVICE_INFO_HEADER {
+                    r#type: DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,
+                    size: size_of::<DISPLAYCONFIG_TARGET_DEVICE_NAME>() as u32,
+                    adapterId: path.targetInfo.adapterId,
+                    id: path.targetInfo.id,
+                };
+                if DisplayConfigGetDeviceInfo(&mut source.header) == 0
+                    && DisplayConfigGetDeviceInfo(&mut target.header) == 0
+                {
+                    let name = decode(&target.monitorFriendlyDeviceName);
+                    if !name.trim().is_empty() {
+                        names.push((decode(&source.viewGdiDeviceName), name));
+                    }
+                }
+            }
+            return names;
+        }
+    }
+    vec![]
 }

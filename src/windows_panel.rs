@@ -281,7 +281,7 @@ unsafe fn text(dc: HDC, label: &str, mut rect: RECT, color: u32, align: u32) {
         s.as_ptr(),
         (s.len() - 1) as i32,
         &mut rect,
-        DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | align,
+        DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS | align,
     );
 }
 fn gradient_color(y: i32, height: i32) -> (u32, u32, u32) {
@@ -610,7 +610,7 @@ unsafe fn paint_control(hwnd: HWND, dc: HDC, state: &ControlState) {
     let label = String::from_utf16_lossy(&buf[..len.max(0) as usize]);
     let focused = windows_sys::Win32::UI::Input::KeyboardAndMouse::GetFocus() == hwnd;
     match id {
-        1002..=1004 => {
+        1002..=1004 | 2000..=2063 => {
             text(
                 dc,
                 &label,
@@ -832,7 +832,7 @@ unsafe extern "system" fn control_proc(
             _ => {}
         }
     }
-    if (1002..=1004).contains(&state.id) {
+    if (1002..=1004).contains(&state.id) || (2000..2064).contains(&state.id) {
         // A rapid second press arrives as WM_LBUTTONDBLCLK. Treat it as
         // another press so each release produces one BN_CLICKED notification.
         if msg == WM_LBUTTONDBLCLK {

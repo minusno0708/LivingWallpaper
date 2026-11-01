@@ -26,6 +26,7 @@ impl ModelMode {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
+    pub disabled_displays: Vec<String>,
     pub mode: ModelMode,
     pub fish_count: usize,
     pub fps: u32,
@@ -37,6 +38,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            disabled_displays: vec![],
             mode: ModelMode::Fish,
             fish_count: 240,
             fps: 30,

@@ -81,12 +81,18 @@ fn run() -> anyhow::Result<()> {
     if !preview {
         platform::attach(hwnd).context("Windows wallpaper integration failed")?;
     }
+    let settings = Arc::new(Mutex::new(settings::Settings::load()));
+    let mut display_gaps = if preview {
+        vec![]
+    } else {
+        platform::configure_displays(hwnd, &settings.lock().unwrap().disabled_displays)?
+    };
+    let mut display_snapshot = platform::displays();
     let mut renderer = pollster::block_on(renderer::Renderer::new(window.clone()))?;
     log(format!(
         "START preview={preview} GPU={}",
         renderer.adapter_name
     ));
-    let settings = Arc::new(Mutex::new(settings::Settings::load()));
     let (tx, rx) = mpsc::channel();
     let _tray = platform::start_tray(tx, settings.clone())?;
     let mut model = create_model(settings.lock().unwrap().mode);
@@ -116,20 +122,25 @@ fn run() -> anyhow::Result<()> {
             let now=Instant::now();
             for command in rx.try_iter() {
                 use platform::Command::*; let mut s=settings.lock().unwrap();
-                match command { Mouse=>s.mouse=!s.mouse,Icons=>s.icons=!s.icons,Power=>s.power_saving=!s.power_saving,Count(n)=>s.fish_count=n,Fps(n)=>s.fps=n,TimeScale(value)=>s.time_scale=settings::normalize_time_scale(value),Mode(mode)=>{if s.mode!=mode {s.mode=mode;model=create_model(mode);}},Quit=>target.exit() }
+                match command { Mouse=>s.mouse=!s.mouse,Icons=>s.icons=!s.icons,Power=>s.power_saving=!s.power_saving,Count(n)=>s.fish_count=n,Fps(n)=>s.fps=n,TimeScale(value)=>s.time_scale=settings::normalize_time_scale(value),Monitor(id)=>{if s.disabled_displays.contains(&id) {s.disabled_displays.retain(|value| value!=&id);} else {s.disabled_displays.push(id);} if !preview {match platform::configure_displays(hwnd,&s.disabled_displays) {Ok(gaps)=>display_gaps=gaps,Err(e)=>log(e.to_string())}}},Mode(mode)=>{if s.mode!=mode {s.mode=mode;model=create_model(mode);}},Quit=>target.exit() }
                 if let Err(e)=s.save() { log(format!("Settings save failed: {e}")); }
                 next_frame=now;
             }
             if smoke && start.elapsed()>Duration::from_secs(8) { smoke_frames.store(frames,std::sync::atomic::Ordering::Relaxed); log(format!("SMOKE {} frames={frames} icons={} GPU={}",if frames>0 {"PASS"} else {"FAIL"},obstacles.len(),renderer.adapter_name)); target.exit(); }
             if !preview && last_health.elapsed()>Duration::from_secs(2) {
                 last_health=now;
+                let current_displays=platform::displays();
+                if current_displays!=display_snapshot {
+                    display_snapshot=current_displays;
+                    match platform::configure_displays(hwnd,&settings.lock().unwrap().disabled_displays) {Ok(gaps)=>display_gaps=gaps,Err(e)=>log(e.to_string())}
+                }
                 if !platform::healthy(hwnd) { log("Explorer wallpaper host lost; exiting. Restart app after Explorer is ready."); target.exit(); }
             }
             let s=settings.lock().unwrap().clone();
             if now>=next_frame {
                 let size=window.inner_size(); let bounds=Vec2::new(size.width as f32,size.height as f32);
                 let env=platform::environment(hwnd);
-                let paused=s.fps==0 || s.time_scale==0.0 || size.width==0 || size.height==0 || (s.power_saving && (env.suspended || (!preview && env.fullscreen)));
+                let paused=(!preview && display_snapshot.iter().all(|d|s.disabled_displays.contains(&d.id))) || s.fps==0 || s.time_scale==0.0 || size.width==0 || size.height==0 || (s.power_saving && (env.suspended || (!preview && env.fullscreen)));
                 let fps=if paused {2} else if s.power_saving && env.battery {s.fps.min(15)} else {s.fps};
                 let dt=now.duration_since(last_frame).as_secs_f32(); last_frame=now;
                 if let Some(cursor)=env.cursor {
@@ -145,8 +156,10 @@ fn run() -> anyhow::Result<()> {
                         last_icons=now;
                         match platform::icons(hwnd) { Ok(rects)=>{ obstacles=rects; },Err(e)=>{obstacles.clear();let message=e.to_string();if message!=last_icon_error {log(format!("Icon avoidance unavailable: {message}"));last_icon_error=message;} } }
                     }
+                    let mut scene_obstacles=display_gaps.clone();
+                    if s.icons {scene_obstacles.extend_from_slice(&obstacles);}
                     model.resize_population(s.fish_count,bounds);
-                    for _ in 0..plan.steps { model.step(plan.step_dt,bounds,if s.icons {&obstacles} else {&[]},pointer); }
+                    for _ in 0..plan.steps { model.step(plan.step_dt,bounds,&scene_obstacles,pointer); }
                     match renderer.render(model.fish(),scene_clock.seconds()) {
                         Ok(())=>frames+=1,
                         Err(wgpu::SurfaceError::Lost|wgpu::SurfaceError::Outdated)=>renderer.resize(size.width,size.height),
