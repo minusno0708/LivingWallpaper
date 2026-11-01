@@ -14,12 +14,14 @@ pub fn normalize_time_scale(value: f32) -> f32 {
 pub enum ModelMode {
     #[default]
     Fish,
+    Plant,
 }
 impl ModelMode {
-    pub const ALL: [Self; 1] = [Self::Fish];
+    pub const ALL: [Self; 2] = [Self::Fish, Self::Plant];
     pub fn label(self) -> &'static str {
         match self {
             Self::Fish => "Fish",
+            Self::Plant => "Plant",
         }
     }
 }
@@ -190,5 +192,22 @@ mod tests {
         std::fs::remove_file(current).unwrap();
         std::fs::remove_file(legacy).unwrap();
         std::fs::remove_dir(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod plant_mode_tests {
+    use super::*;
+    #[test]
+    fn plant_selection_persists_and_old_settings_remain_fish() {
+        let old: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.mode, ModelMode::Fish);
+        let settings = Settings {
+            mode: ModelMode::Plant,
+            ..Settings::default()
+        };
+        let loaded: Settings =
+            serde_json::from_slice(&serde_json::to_vec(&settings).unwrap()).unwrap();
+        assert_eq!(loaded.mode, ModelMode::Plant);
     }
 }

@@ -337,8 +337,9 @@ const COUNT_ID: i32 = 1010;
 const FPS_ID: i32 = 1020;
 const TIME_ID: i32 = 1050;
 const QUIT_ID: i32 = 1099;
+const RESET_ID: i32 = 1098;
 // id, class, label, style, x, y, width, height (96-DPI logical pixels).
-const PANEL_CONTROLS: [(i32, &str, &str, u32, i32, i32, i32, i32); 17] = [
+const PANEL_CONTROLS: [(i32, &str, &str, u32, i32, i32, i32, i32); 18] = [
     (1040, "STATIC", "Living Wallpaper", 0, 50, 16, 236, 28),
     (
         panel::CLOSE_ID,
@@ -430,6 +431,16 @@ const PANEL_CONTROLS: [(i32, &str, &str, u32, i32, i32, i32, i32); 17] = [
         436,
         300,
         30,
+    ),
+    (
+        RESET_ID,
+        "BUTTON",
+        "庭をリセット",
+        BS_OWNERDRAW as u32 | WS_TABSTOP,
+        20,
+        286,
+        300,
+        28,
     ),
     (
         QUIT_ID,
@@ -634,6 +645,25 @@ unsafe fn refresh_panel(hwnd: HWND, context: &mut TrayContext) {
     }
     let mut s = s;
     s.normalize();
+    ShowWindow(
+        GetDlgItem(hwnd, RESET_ID),
+        if s.mode == ModelMode::Plant {
+            SW_SHOW
+        } else {
+            SW_HIDE
+        },
+    );
+    for id in [1003, 1005, 1045, COUNT_ID] {
+        ShowWindow(
+            GetDlgItem(hwnd, id),
+            if s.mode == ModelMode::Fish {
+                SW_SHOW
+            } else {
+                SW_HIDE
+            },
+        );
+    }
+
     context.last_count = s.fish_count;
     context.last_fps = s.fps;
     context.last_time_scale = s.time_scale;
@@ -875,10 +905,29 @@ unsafe extern "system" fn tray_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) 
                 (1004, BN_CLICKED) => Some(Command::Power),
                 (MODE_ID, CBN_SELCHANGE) => {
                     let index = SendMessageW(GetDlgItem(hwnd, MODE_ID), CB_GETCURSEL, 0, 0);
+                    if let Some(mode) = ModelMode::ALL.get(index as usize) {
+                        ShowWindow(GetDlgItem(hwnd,RESET_ID),if *mode==ModelMode::Plant {SW_SHOW}else{SW_HIDE});
+                        for id in [1003, 1005, 1045, COUNT_ID] {
+                            ShowWindow(
+                                GetDlgItem(hwnd, id),
+                                if *mode == ModelMode::Fish {
+                                    SW_SHOW
+                                } else {
+                                    SW_HIDE
+                                },
+                            );
+                        }
+                    }
                     ModelMode::ALL
                         .get(index as usize)
                         .copied()
                         .map(Command::Mode)
+                }
+                (RESET_ID,BN_CLICKED)=>{
+                    if SendMessageW(GetDlgItem(hwnd,MODE_ID),CB_GETCURSEL,0,0)==1 &&
+                        MessageBoxW(hwnd,wide("全モニターの庭をリセットしますか？\n植物・種・水分・成長状態が消去されます。設定は維持されます。").as_ptr(),wide("庭をリセット").as_ptr(),MB_YESNO|MB_ICONQUESTION|MB_DEFBUTTON2)==IDYES {
+                        Some(Command::ResetGarden)
+                    }else{None}
                 }
                 (QUIT_ID, BN_CLICKED) => {
                     ShowWindow(hwnd, SW_HIDE);
@@ -1099,7 +1148,7 @@ mod panel_tests {
             assert_eq!(GetDlgItem(hwnd, 1007), 0, "FPS legend must be removed");
             assert_eq!(
                 SendMessageW(GetDlgItem(hwnd, MODE_ID), CB_GETCOUNT, 0, 0),
-                1
+                2
             );
             assert_eq!(GetDlgItem(hwnd, 1001), 0, "pause checkbox must be removed");
             assert_eq!(
@@ -1201,6 +1250,19 @@ mod panel_tests {
                 mode,
             );
             assert!(matches!(rx.try_recv(), Ok(Command::Mode(ModelMode::Fish))));
+            SendMessageW(mode, CB_SETCURSEL, 1, 0);
+            SendMessageW(
+                hwnd,
+                WM_COMMAND,
+                MODE_ID as usize | ((CBN_SELCHANGE as usize) << 16),
+                mode,
+            );
+            assert!(matches!(rx.try_recv(), Ok(Command::Mode(ModelMode::Plant))));
+            assert_eq!(
+                GetWindowLongPtrW(GetDlgItem(hwnd, COUNT_ID), GWL_STYLE) & WS_VISIBLE as isize,
+                0
+            );
+
             SendMessageW(hwnd, WM_CLOSE, 0, 0);
             assert_ne!(
                 IsWindow(hwnd),
@@ -1244,6 +1306,7 @@ unsafe extern "system" fn enumerate_display(
             y: r.top,
             width: r.right - r.left,
             height: r.bottom - r.top,
+            work_bottom: info.monitorInfo.rcWork.bottom,
         });
     }
     1

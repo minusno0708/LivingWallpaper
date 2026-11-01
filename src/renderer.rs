@@ -25,6 +25,10 @@ pub struct Renderer {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     pipeline: wgpu::RenderPipeline,
+    plant_pipeline: wgpu::RenderPipeline,
+    plant_buffer: wgpu::Buffer,
+    plant_capacity: u64,
+    plant_msaa: Option<(u32, u32, wgpu::Texture)>,
     background_pipeline: wgpu::RenderPipeline,
     instances: wgpu::Buffer,
     view: wgpu::Buffer,
@@ -34,6 +38,16 @@ pub struct Renderer {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn plant_shader_is_valid() {
+        let module = naga::front::wgsl::parse_str(include_str!("plant.wgsl")).unwrap();
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::empty(),
+        )
+        .validate(&module)
+        .unwrap();
+    }
     #[test]
     fn background_shader_is_valid() {
         let module = naga::front::wgsl::parse_str(include_str!("background.wgsl"))
@@ -198,6 +212,47 @@ impl Renderer {
             multisample: wgpu::MultisampleState::default(),
             multiview: None,
         });
+        let plant_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Plant"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("plant.wgsl").into()),
+        });
+        let plant_attributes = wgpu::vertex_attr_array![0=>Float32x2,1=>Float32x4];
+        let plant_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Plant"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &plant_shader,
+                entry_point: "vs_main",
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: 24,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &plant_attributes,
+                }],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &plant_shader,
+                entry_point: "fs_main",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState {
+                count: 4,
+                ..Default::default()
+            },
+            multiview: None,
+        });
+        let plant_capacity = 1024 * 1024;
+        let plant_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Plant vertices"),
+            size: plant_capacity,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let instances = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("fish instances"),
             size: 1000 * 24,
@@ -210,6 +265,10 @@ impl Renderer {
             queue,
             config,
             pipeline,
+            plant_pipeline,
+            plant_buffer,
+            plant_capacity,
+            plant_msaa: None,
             background_pipeline,
             instances,
             view,
@@ -226,6 +285,21 @@ impl Renderer {
         self.surface.configure(&self.device, &self.config);
     }
     pub fn render(&mut self, fish: &[Fish], time: f32) -> Result<(), wgpu::SurfaceError> {
+        self.render_scene(fish, time, None)
+    }
+    pub fn render_plant(
+        &mut self,
+        vertices: &[crate::plant::Vertex],
+        time: f32,
+    ) -> Result<(), wgpu::SurfaceError> {
+        self.render_scene(&[], time, Some(vertices))
+    }
+    fn render_scene(
+        &mut self,
+        fish: &[Fish],
+        time: f32,
+        plant: Option<&[crate::plant::Vertex]>,
+    ) -> Result<(), wgpu::SurfaceError> {
         let frame = self.surface.get_current_texture()?;
         let data: Vec<_> = fish
             .iter()
@@ -239,6 +313,21 @@ impl Renderer {
             .collect();
         self.queue
             .write_buffer(&self.instances, 0, bytemuck::cast_slice(&data));
+        if let Some(vertices) = plant {
+            let bytes = bytemuck::cast_slice(vertices);
+            if bytes.len() as u64 > self.plant_capacity {
+                self.plant_capacity = (bytes.len() as u64).next_power_of_two();
+                self.plant_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Plant vertices"),
+                    size: self.plant_capacity,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+            }
+            if !bytes.is_empty() {
+                self.queue.write_buffer(&self.plant_buffer, 0, bytes);
+            }
+        }
         self.queue.write_buffer(
             &self.view,
             0,
@@ -249,13 +338,44 @@ impl Renderer {
             }),
         );
         let target = frame.texture.create_view(&Default::default());
+        let smooth_target = if plant.is_some() {
+            if self.plant_msaa.as_ref().map(|(w, h, _)| (*w, *h))
+                != Some((self.config.width, self.config.height))
+            {
+                let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("Plant smooth silhouettes"),
+                    size: wgpu::Extent3d {
+                        width: self.config.width,
+                        height: self.config.height,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 4,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: self.config.format,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                    view_formats: &[],
+                });
+                self.plant_msaa = Some((self.config.width, self.config.height, texture));
+            }
+            Some(
+                self.plant_msaa
+                    .as_ref()
+                    .unwrap()
+                    .2
+                    .create_view(&Default::default()),
+            )
+        } else {
+            self.plant_msaa = None;
+            None
+        };
         let mut encoder = self.device.create_command_encoder(&Default::default());
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("ocean"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &target,
-                    resolve_target: None,
+                    view: smooth_target.as_ref().unwrap_or(&target),
+                    resolve_target: smooth_target.as_ref().map(|_| &target),
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
                             r: 0.006,
@@ -270,13 +390,20 @@ impl Renderer {
                 occlusion_query_set: None,
                 timestamp_writes: None,
             });
-            pass.set_pipeline(&self.background_pipeline);
-            pass.set_bind_group(0, &self.bindings, &[]);
-            pass.draw(0..3, 0..1);
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &self.bindings, &[]);
-            pass.set_vertex_buffer(0, self.instances.slice(..));
-            pass.draw(0..6, 0..data.len() as u32);
+            if let Some(vertices) = plant {
+                pass.set_pipeline(&self.plant_pipeline);
+                pass.set_bind_group(0, &self.bindings, &[]);
+                pass.set_vertex_buffer(0, self.plant_buffer.slice(..));
+                pass.draw(0..vertices.len() as u32, 0..1);
+            } else {
+                pass.set_pipeline(&self.background_pipeline);
+                pass.set_bind_group(0, &self.bindings, &[]);
+                pass.draw(0..3, 0..1);
+                pass.set_pipeline(&self.pipeline);
+                pass.set_bind_group(0, &self.bindings, &[]);
+                pass.set_vertex_buffer(0, self.instances.slice(..));
+                pass.draw(0..6, 0..data.len() as u32);
+            }
         }
         self.queue.submit(Some(encoder.finish()));
         frame.present();

@@ -11,6 +11,7 @@ pub enum Command {
     Fps(u32),
     TimeScale(f32),
     Monitor(String),
+    ResetGarden,
     Quit,
 }
 #[derive(Default)]
@@ -58,6 +59,7 @@ pub struct Display {
     pub y: i32,
     pub width: i32,
     pub height: i32,
+    pub work_bottom: i32,
 }
 #[cfg(not(windows))]
 pub fn displays() -> Vec<Display> {
@@ -118,6 +120,7 @@ mod display_tests {
             y,
             width: 1920,
             height: 1080,
+            work_bottom: y + 1080,
         }
     }
     #[test]
