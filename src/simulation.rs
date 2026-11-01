@@ -100,35 +100,38 @@ fn icon_clearance(rect: Obstacle, size: Vec2) -> Obstacle {
     Obstacle { min, max }
 }
 fn free_projection(point: Vec2, size: Vec2, obstacles: &[Obstacle]) -> Option<Vec2> {
-    let mut region = *obstacles.iter().find(|&&o| contains(o, point))?;
-    // Combine overlapping clearances only when a correction is needed. This
-    // prevents successive icons from projecting a fish back into each other.
-    loop {
-        let before = region;
-        for o in obstacles {
-            if o.min.cmple(region.max).all() && o.max.cmpge(region.min).all() {
-                region.min = region.min.min(o.min);
-                region.max = region.max.max(o.max);
+    if !obstacles.iter().any(|&o| contains(o, point)) {
+        return None;
+    }
+    // The bounding box of connected obstacles is not their union: an L-shaped
+    // monitor gap can span the entire scene while leaving ample free space.
+    // Test actual rectangle edges/corners and validate against every obstacle.
+    let mut best: Option<Vec2> = None;
+    for o in obstacles {
+        let lo = o.min - Vec2::splat(0.5);
+        let hi = o.max + Vec2::splat(0.5);
+        for candidate in [
+            Vec2::new(lo.x, point.y),
+            Vec2::new(hi.x, point.y),
+            Vec2::new(point.x, lo.y),
+            Vec2::new(point.x, hi.y),
+            lo,
+            hi,
+            Vec2::new(lo.x, hi.y),
+            Vec2::new(hi.x, lo.y),
+        ] {
+            if candidate.cmpge(Vec2::ZERO).all()
+                && candidate.cmple(size).all()
+                && !obstacles.iter().any(|&r| contains(r, candidate))
+                && best.map_or(true, |old| {
+                    candidate.distance_squared(point) < old.distance_squared(point)
+                })
+            {
+                best = Some(candidate);
             }
         }
-        if region.min == before.min && region.max == before.max {
-            break;
-        }
     }
-    let candidates = [
-        Vec2::new(region.min.x - 0.5, point.y),
-        Vec2::new(region.max.x + 0.5, point.y),
-        Vec2::new(point.x, region.min.y - 0.5),
-        Vec2::new(point.x, region.max.y + 0.5),
-    ];
-    candidates
-        .into_iter()
-        .filter(|p| p.cmpge(Vec2::ZERO).all() && p.cmple(size).all())
-        .filter(|p| !obstacles.iter().any(|&o| contains(o, *p)))
-        .min_by(|a, b| {
-            a.distance_squared(point)
-                .total_cmp(&b.distance_squared(point))
-        })
+    best
 }
 fn cursor_is_solid(p: Pointer) -> bool {
     p.enabled && p.still_seconds >= 10.0 && p.speed <= 35.0
@@ -466,6 +469,16 @@ impl SchoolModel for FishSchool {
                 f.position = position;
                 f.velocity = tangent * f.velocity.length().clamp(35.0, MAX_SPEED);
             }
+            // Clamping position alone leaves an outward velocity pinned against
+            // the wall when cohesion/avoidance overpowers the soft edge force.
+            for axis in 0..2 {
+                if f.position[axis] <= 0.001 && f.velocity[axis] < 0.0 {
+                    f.velocity[axis] = f.velocity[axis].abs().max(35.0);
+                } else if f.position[axis] >= size[axis] - 0.001 && f.velocity[axis] > 0.0 {
+                    f.velocity[axis] = -f.velocity[axis].abs().max(35.0);
+                }
+            }
+            f.velocity = f.velocity.clamp_length_max(MAX_SPEED);
             f.phase += dt * (5.0 + f.velocity.length() * 0.03);
         }
     }
@@ -773,5 +786,44 @@ mod tests {
                 start.elapsed().as_secs_f64() * 1000.0 / 600.0
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod edge_regression_tests {
+    use super::*;
+    #[test]
+    fn l_shaped_monitor_gaps_do_not_hide_valid_exits() {
+        let size = Vec2::splat(1000.0);
+        let obstacles = [
+            Obstacle {
+                min: Vec2::ZERO,
+                max: Vec2::new(100.0, 1000.0),
+            },
+            Obstacle {
+                min: Vec2::new(0.0, 900.0),
+                max: size,
+            },
+        ];
+        let point = Vec2::new(50.0, 500.0);
+        let exit =
+            free_projection(point, size, &obstacles).expect("L-shaped union has a free exit");
+        assert!(exit.x > 100.0 && exit.y < 900.0);
+        assert!(!obstacles.iter().any(|&o| contains(o, exit)));
+    }
+    #[test]
+    fn outward_velocity_at_left_wall_turns_back_into_scene() {
+        let mut school = FishSchool::default();
+        school.fish.push(Fish {
+            position: Vec2::new(0.0, 500.0),
+            velocity: Vec2::new(-150.0, 0.0),
+            phase: 0.0,
+        });
+        school.step(1.0 / 60.0, Vec2::splat(1000.0), &[], Pointer::default());
+        assert!(school.fish[0].velocity.x > 0.0);
+        for _ in 0..60 {
+            school.step(1.0 / 60.0, Vec2::splat(1000.0), &[], Pointer::default());
+        }
+        assert!(school.fish[0].position.x > 20.0);
     }
 }
