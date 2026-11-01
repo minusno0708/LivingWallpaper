@@ -38,6 +38,10 @@ READMEのGIFは現在のシミュレーションとシェーダーによるオ�
 - macOS連携・ビルド、魚以外のモデル、GPU compute、自動起動、インストーラー、署名は未実装。
 - 密集時は近傍探索が最悪O(N²)。アイコン取得は時間上限までの部分的な結果となり得る。
 
+## 開発運用
+
+正式リリース以降は作業ブランチで変更し、main向けPRから取り込む。mainへの直接コミット・pushは行わず、マージは明示指示後にチェックを確認して実施する。詳細は[git-setup.md](git-setup.md)を参照。
+
 ## 引き継ぎ
 
 [requirements.md](requirements.md)の要件と[architecture.md](architecture.md)の境界を維持する。個人・端末情報はGit管理外の `docs/local/` に分離する。新しい環境の手順は[development.md](development.md)、検証結果は[validation.md](validation.md)へ記録する。
