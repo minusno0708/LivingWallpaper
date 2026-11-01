@@ -634,6 +634,17 @@ unsafe fn refresh_panel(hwnd: HWND, context: &mut TrayContext) {
     }
     let mut s = s;
     s.normalize();
+    for id in [1003, 1005, 1045, COUNT_ID] {
+        ShowWindow(
+            GetDlgItem(hwnd, id),
+            if s.mode == ModelMode::Fish {
+                SW_SHOW
+            } else {
+                SW_HIDE
+            },
+        );
+    }
+
     context.last_count = s.fish_count;
     context.last_fps = s.fps;
     context.last_time_scale = s.time_scale;
@@ -875,6 +886,18 @@ unsafe extern "system" fn tray_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) 
                 (1004, BN_CLICKED) => Some(Command::Power),
                 (MODE_ID, CBN_SELCHANGE) => {
                     let index = SendMessageW(GetDlgItem(hwnd, MODE_ID), CB_GETCURSEL, 0, 0);
+                    if let Some(mode) = ModelMode::ALL.get(index as usize) {
+                        for id in [1003, 1005, 1045, COUNT_ID] {
+                            ShowWindow(
+                                GetDlgItem(hwnd, id),
+                                if *mode == ModelMode::Fish {
+                                    SW_SHOW
+                                } else {
+                                    SW_HIDE
+                                },
+                            );
+                        }
+                    }
                     ModelMode::ALL
                         .get(index as usize)
                         .copied()
@@ -1099,7 +1122,7 @@ mod panel_tests {
             assert_eq!(GetDlgItem(hwnd, 1007), 0, "FPS legend must be removed");
             assert_eq!(
                 SendMessageW(GetDlgItem(hwnd, MODE_ID), CB_GETCOUNT, 0, 0),
-                1
+                2
             );
             assert_eq!(GetDlgItem(hwnd, 1001), 0, "pause checkbox must be removed");
             assert_eq!(

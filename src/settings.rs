@@ -14,12 +14,14 @@ pub fn normalize_time_scale(value: f32) -> f32 {
 pub enum ModelMode {
     #[default]
     Fish,
+    Eyes,
 }
 impl ModelMode {
-    pub const ALL: [Self; 1] = [Self::Fish];
+    pub const ALL: [Self; 2] = [Self::Fish, Self::Eyes];
     pub fn label(self) -> &'static str {
         match self {
             Self::Fish => "Fish",
+            Self::Eyes => "Eyes",
         }
     }
 }
@@ -190,5 +192,23 @@ mod tests {
         std::fs::remove_file(current).unwrap();
         std::fs::remove_file(legacy).unwrap();
         std::fs::remove_dir(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod eyes_settings_tests {
+    use super::*;
+    #[test]
+    fn eyes_mode_round_trips_without_changing_fish_defaults() {
+        let old: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.mode, ModelMode::Fish);
+        let settings = Settings {
+            mode: ModelMode::Eyes,
+            ..Settings::default()
+        };
+        let loaded: Settings =
+            serde_json::from_slice(&serde_json::to_vec(&settings).unwrap()).unwrap();
+        assert_eq!(loaded.mode, ModelMode::Eyes);
+        assert_eq!(loaded.fish_count, 240);
     }
 }

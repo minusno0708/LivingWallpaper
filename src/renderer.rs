@@ -25,6 +25,8 @@ pub struct Renderer {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     pipeline: wgpu::RenderPipeline,
+    eyes_pipeline: wgpu::RenderPipeline,
+    eyes_buffer: wgpu::Buffer,
     background_pipeline: wgpu::RenderPipeline,
     instances: wgpu::Buffer,
     view: wgpu::Buffer,
@@ -34,6 +36,17 @@ pub struct Renderer {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn eyes_shader_is_valid() {
+        let module =
+            naga::front::wgsl::parse_str(include_str!("eyes.wgsl")).expect("parse eyes shader");
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::empty(),
+        )
+        .validate(&module)
+        .expect("validate eyes shader");
+    }
     #[test]
     fn background_shader_is_valid() {
         let module = naga::front::wgsl::parse_str(include_str!("background.wgsl"))
@@ -198,6 +211,44 @@ impl Renderer {
             multisample: wgpu::MultisampleState::default(),
             multiview: None,
         });
+        let eyes_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Eyes"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("eyes.wgsl").into()),
+        });
+        let eyes_attributes =
+            wgpu::vertex_attr_array![0=>Float32x2,1=>Float32x2,2=>Float32x2,3=>Float32,4=>Float32];
+        let eyes_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Eyes"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &eyes_shader,
+                entry_point: "vs_main",
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: 32,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &eyes_attributes,
+                }],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &eyes_shader,
+                entry_point: "fs_main",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+        });
+        let eyes_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Eyes instances"),
+            size: 64 * 32,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let instances = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("fish instances"),
             size: 1000 * 24,
@@ -210,6 +261,8 @@ impl Renderer {
             queue,
             config,
             pipeline,
+            eyes_pipeline,
+            eyes_buffer,
             background_pipeline,
             instances,
             view,
@@ -226,6 +279,21 @@ impl Renderer {
         self.surface.configure(&self.device, &self.config);
     }
     pub fn render(&mut self, fish: &[Fish], time: f32) -> Result<(), wgpu::SurfaceError> {
+        self.render_scene(fish, time, None)
+    }
+    pub fn render_eyes(
+        &mut self,
+        eyes: &[crate::eyes::Eye],
+        time: f32,
+    ) -> Result<(), wgpu::SurfaceError> {
+        self.render_scene(&[], time, Some(eyes))
+    }
+    fn render_scene(
+        &mut self,
+        fish: &[Fish],
+        time: f32,
+        eyes: Option<&[crate::eyes::Eye]>,
+    ) -> Result<(), wgpu::SurfaceError> {
         let frame = self.surface.get_current_texture()?;
         let data: Vec<_> = fish
             .iter()
@@ -239,6 +307,22 @@ impl Renderer {
             .collect();
         self.queue
             .write_buffer(&self.instances, 0, bytemuck::cast_slice(&data));
+        if let Some(eyes) = eyes {
+            let data: Vec<[f32; 8]> = eyes
+                .iter()
+                .take(64)
+                .map(|e| {
+                    [
+                        e.center.x, e.center.y, e.size.x, e.size.y, e.gaze.x, e.gaze.y, e.openness,
+                        e.seed,
+                    ]
+                })
+                .collect();
+            if !data.is_empty() {
+                self.queue
+                    .write_buffer(&self.eyes_buffer, 0, bytemuck::cast_slice(&data));
+            }
+        }
         self.queue.write_buffer(
             &self.view,
             0,
@@ -257,11 +341,15 @@ impl Renderer {
                     view: &target,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.006,
-                            g: 0.025,
-                            b: 0.045,
-                            a: 1.0,
+                        load: wgpu::LoadOp::Clear(if eyes.is_some() {
+                            wgpu::Color::BLACK
+                        } else {
+                            wgpu::Color {
+                                r: 0.006,
+                                g: 0.025,
+                                b: 0.045,
+                                a: 1.0,
+                            }
                         }),
                         store: wgpu::StoreOp::Store,
                     },
@@ -270,13 +358,20 @@ impl Renderer {
                 occlusion_query_set: None,
                 timestamp_writes: None,
             });
-            pass.set_pipeline(&self.background_pipeline);
-            pass.set_bind_group(0, &self.bindings, &[]);
-            pass.draw(0..3, 0..1);
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &self.bindings, &[]);
-            pass.set_vertex_buffer(0, self.instances.slice(..));
-            pass.draw(0..6, 0..data.len() as u32);
+            if let Some(eyes) = eyes {
+                pass.set_pipeline(&self.eyes_pipeline);
+                pass.set_bind_group(0, &self.bindings, &[]);
+                pass.set_vertex_buffer(0, self.eyes_buffer.slice(..));
+                pass.draw(0..6, 0..eyes.len().min(64) as u32);
+            } else {
+                pass.set_pipeline(&self.background_pipeline);
+                pass.set_bind_group(0, &self.bindings, &[]);
+                pass.draw(0..3, 0..1);
+                pass.set_pipeline(&self.pipeline);
+                pass.set_bind_group(0, &self.bindings, &[]);
+                pass.set_vertex_buffer(0, self.instances.slice(..));
+                pass.draw(0..6, 0..data.len() as u32);
+            }
         }
         self.queue.submit(Some(encoder.finish()));
         frame.present();

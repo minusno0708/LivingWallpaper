@@ -2,6 +2,7 @@
     all(windows, not(debug_assertions), not(test)),
     windows_subsystem = "windows"
 )]
+mod eyes;
 mod platform;
 mod renderer;
 mod scene_time;
@@ -56,9 +57,10 @@ fn main() {
         std::process::exit(1);
     }
 }
-fn create_model(mode: settings::ModelMode) -> Box<dyn SchoolModel> {
+fn create_model(mode: settings::ModelMode) -> Option<Box<dyn SchoolModel>> {
     match mode {
-        settings::ModelMode::Fish => Box::<simulation::FishSchool>::default(),
+        settings::ModelMode::Fish => Some(Box::<simulation::FishSchool>::default()),
+        settings::ModelMode::Eyes => None,
     }
 }
 fn run() -> anyhow::Result<()> {
@@ -96,6 +98,7 @@ fn run() -> anyhow::Result<()> {
     let (tx, rx) = mpsc::channel();
     let _tray = platform::start_tray(tx, settings.clone())?;
     let mut model = create_model(settings.lock().unwrap().mode);
+    let mut eyes = eyes::EyesScene::default();
     let mut pointer = Pointer::default();
     let mut previous_cursor = None;
     let mut obstacles = Vec::new();
@@ -122,7 +125,7 @@ fn run() -> anyhow::Result<()> {
             let now=Instant::now();
             for command in rx.try_iter() {
                 use platform::Command::*; let mut s=settings.lock().unwrap();
-                match command { Mouse=>s.mouse=!s.mouse,Icons=>s.icons=!s.icons,Power=>s.power_saving=!s.power_saving,Count(n)=>s.fish_count=n,Fps(n)=>s.fps=n,TimeScale(value)=>s.time_scale=settings::normalize_time_scale(value),Monitor(id)=>{if s.disabled_displays.contains(&id) {s.disabled_displays.retain(|value| value!=&id);} else {s.disabled_displays.push(id);} if !preview {match platform::configure_displays(hwnd,&s.disabled_displays) {Ok(gaps)=>display_gaps=gaps,Err(e)=>log(e.to_string())}}},Mode(mode)=>{if s.mode!=mode {s.mode=mode;model=create_model(mode);}},Quit=>target.exit() }
+                match command { Mouse=>s.mouse=!s.mouse,Icons=>s.icons=!s.icons,Power=>s.power_saving=!s.power_saving,Count(n)=>s.fish_count=n,Fps(n)=>s.fps=n,TimeScale(value)=>s.time_scale=settings::normalize_time_scale(value),Monitor(id)=>{if s.disabled_displays.contains(&id) {s.disabled_displays.retain(|value| value!=&id);} else {s.disabled_displays.push(id);} if !preview {match platform::configure_displays(hwnd,&s.disabled_displays) {Ok(gaps)=>display_gaps=gaps,Err(e)=>log(e.to_string())}}},Mode(mode)=>{if s.mode!=mode {s.mode=mode;model=create_model(mode);eyes=eyes::EyesScene::default();}},Quit=>target.exit() }
                 if let Err(e)=s.save() { log(format!("Settings save failed: {e}")); }
                 next_frame=now;
             }
@@ -152,15 +155,29 @@ fn run() -> anyhow::Result<()> {
                 } else { pointer.enabled=false; }
                 let plan=scene_clock.advance(dt,s.time_scale,paused);
                 if !paused {
-                    if s.icons && !preview && last_icons.elapsed()>Duration::from_secs(2) {
+                    if model.is_some() && s.icons && !preview && last_icons.elapsed()>Duration::from_secs(2) {
                         last_icons=now;
                         match platform::icons(hwnd) { Ok(rects)=>{ obstacles=rects; },Err(e)=>{obstacles.clear();let message=e.to_string();if message!=last_icon_error {log(format!("Icon avoidance unavailable: {message}"));last_icon_error=message;} } }
                     }
                     let mut scene_obstacles=display_gaps.clone();
                     if s.icons {scene_obstacles.extend_from_slice(&obstacles);}
-                    model.resize_population(s.fish_count,bounds);
-                    for _ in 0..plan.steps { model.step(plan.step_dt,bounds,&scene_obstacles,pointer); }
-                    match renderer.render(model.fish(),scene_clock.seconds()) {
+                    let rendered=if let Some(model)=model.as_mut() {
+                        model.resize_population(s.fish_count,bounds);
+                        for _ in 0..plan.steps {model.step(plan.step_dt,bounds,&scene_obstacles,pointer);}
+                        renderer.render(model.fish(),scene_clock.seconds())
+                    } else {
+                        let regions=if preview {vec![(Vec2::ZERO,bounds)]} else {
+                            let left=display_snapshot.iter().map(|d|d.x).min().unwrap_or(0);
+                            let top=display_snapshot.iter().map(|d|d.y).min().unwrap_or(0);
+                            display_snapshot.iter().filter(|d|!s.disabled_displays.contains(&d.id)).map(|d|{
+                                let min=Vec2::new((d.x-left) as f32,(d.y-top) as f32);
+                                (min,min+Vec2::new(d.width as f32,d.height as f32))
+                            }).collect()
+                        };
+                        for _ in 0..plan.steps {eyes.step(plan.step_dt,&regions,pointer);}
+                        renderer.render_eyes(&eyes.eyes,scene_clock.seconds())
+                    };
+                    match rendered {
                         Ok(())=>frames+=1,
                         Err(wgpu::SurfaceError::Lost|wgpu::SurfaceError::Outdated)=>renderer.resize(size.width,size.height),
                         Err(wgpu::SurfaceError::OutOfMemory)=>{log("GPU out of memory");target.exit();},

@@ -55,3 +55,8 @@ Zen Kaku Gothic New RegularをEXEへ埋め込み、AddFontMemResourceExでプロ
 設定はLOCALAPPDATA配下。旧FishSchoolWallpaperの設定があり新設定がない場合に引き継ぐ。旧paused=trueはFPS=0へ移行し、pausedを再保存しない。新項目がない旧設定は時間倍率1・全モニター有効として扱う。
 
 個人情報・端末情報はGit管理外のdocs/localへ置く。公開用EXEはbuild.ps1の検査を通す。READMEのGIFはアプリの実行時依存ではなく、READMEをローカルでも表示するため配布へ同梱する。macOSのOS連携はスタブ。
+
+
+## Eyes追加ブランチ
+
+src/eyes.rsにFishとは独立したEyesSceneを置き、イベント遷移と目のデータを保持。mainはFish時のみSchoolModelを生成し、Eyes時は同じSceneClockからEyesSceneへ差分を渡す。RendererはEyesの32バイトインスタンスと専用WGSLパイプラインを使い、背景を黒でクリアする。Eyesの詳細はeyes-scene.md。

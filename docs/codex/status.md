@@ -45,3 +45,8 @@ READMEのGIFは現在のシミュレーションとシェーダーによるオ�
 ## 引き継ぎ
 
 [requirements.md](requirements.md)の要件と[architecture.md](architecture.md)の境界を維持する。個人・端末情報はGit管理外の `docs/local/` に分離する。新しい環境の手順は[development.md](development.md)、検証結果は[validation.md](validation.md)へ記録する。
+
+
+## Eyesシーン追加（作業ブランチ）
+
+feat/eyes-sceneで開発。Fish/Eyesの選択、黒背景、手続き的な目、開閉、通常・一斉開眼・巨大目・静止カーソル注視、全体で同期する視線パターンを実装。詳細と初期値はeyes-scene.md。mainへ未マージであり、正式版への反映済みとは扱わない。

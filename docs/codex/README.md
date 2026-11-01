@@ -10,6 +10,7 @@
 
 | 資料 | 内容 | 主な参照タイミング |
 |---|---|---|
+| [eyes-scene.md](eyes-scene.md) | Eyesの演出・状態遷移・初期値 | Eyesの追加開発 |
 | [requirements.md](requirements.md) | 合意済み要件、対象範囲、受入条件 | 新規作業・仕様判断 |
 | [architecture.md](architecture.md) | モジュール構成、処理の流れ、OS依存、拡張時の注意 | 実装・設計変更 |
 | [status.md](status.md) | 実装済み・未実装、開発経緯、未解決事項 | 作業開始・終了 |
