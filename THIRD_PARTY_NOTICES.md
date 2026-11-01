@@ -1,5 +1,7 @@
 # Third-party dependency notices
 
+設定画面にはZen Kaku Gothic New Regularを同梱しています。Copyright 2022 The Zen Kaku Gothic Project Authors (https://github.com/googlefonts/zen-kakugothic)。SIL Open Font License 1.1。全文は[OFL.txt](third-party-licenses/zen-kaku-gothic-new/OFL.txt)を参照してください。
+
 Cargo.lockに固定した依存パッケージのメタデータと、配布crateに含まれるライセンス・著作権表示をthird-party-licenses/に同梱しています。非Windows向け依存も含みます。
 
 | Package | License expression |

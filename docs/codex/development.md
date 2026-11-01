@@ -74,7 +74,7 @@ $env:RUSTFLAGS = $null
 cargo test --release --locked simulation_benchmark -- --ignored --nocapture
 ```
 
-通常は17件成功・性能測定1件ignoreが現在の基準（魚・背景のWGSL検証、孤立個体の復帰・速度上限を含む）。テストを追加したら件数・記録を更新する。
+Windowsでは通常23件成功・性能測定1件ignoreが現在の基準（魚・背景のWGSL検証、孤立個体の復帰・速度上限を含む）。テストを追加したら件数・記録を更新する。
 
 ## CIと配布
 

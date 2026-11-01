@@ -1,11 +1,16 @@
 //! Explorer integration is intentionally isolated; WorkerW/0x052c are undocumented.
 use super::*;
+use crate::settings::{ModelMode, FPS_CHOICES};
 use anyhow::{bail, ensure};
 use std::{
     mem::{size_of, zeroed},
     ptr::{null, null_mut},
     sync::atomic::{AtomicBool, Ordering},
     time::Instant,
+};
+use windows_sys::Win32::UI::Controls::{
+    InitCommonControlsEx, ICC_BAR_CLASSES, INITCOMMONCONTROLSEX, TBM_SETLINESIZE, TBM_SETPAGESIZE,
+    TBM_SETPOS, TBM_SETRANGEMAX, TBM_SETRANGEMIN, TBS_NOTICKS, TB_THUMBTRACK,
 };
 use windows_sys::Win32::{
     Foundation::*,
@@ -14,7 +19,7 @@ use windows_sys::Win32::{
         Diagnostics::Debug::*, LibraryLoader::*, Memory::*, Power::*, RemoteDesktop::*,
         Threading::*,
     },
-    UI::{Shell::*, WindowsAndMessaging::*},
+    UI::{HiDpi::*, Input::KeyboardAndMouse::SetFocus, Shell::*, WindowsAndMessaging::*},
 };
 
 fn wide(s: &str) -> Vec<u16> {
@@ -333,21 +338,371 @@ pub fn single_instance() -> anyhow::Result<InstanceGuard> {
         Ok(InstanceGuard(handle))
     }
 }
+#[path = "windows_panel.rs"]
+mod panel;
+const PANEL_STYLE: u32 = WS_POPUP | WS_SYSMENU | WS_CLIPCHILDREN;
+const PANEL_EXSTYLE: u32 = WS_EX_TOOLWINDOW | WS_EX_CONTROLPARENT;
+// TBM_GETPOS equals WM_USER; windows-sys 0.52 omits this zero-offset constant.
+const TBM_GETPOS: u32 = WM_USER;
+const MODE_ID: i32 = 1030;
+const COUNT_ID: i32 = 1010;
+const FPS_ID: i32 = 1020;
+const TIME_ID: i32 = 1050;
+const QUIT_ID: i32 = 1099;
+// id, class, label, style, x, y, width, height (96-DPI logical pixels).
+const PANEL_CONTROLS: [(i32, &str, &str, u32, i32, i32, i32, i32); 17] = [
+    (1040, "STATIC", "Living Wallpaper", 0, 50, 16, 236, 28),
+    (
+        panel::CLOSE_ID,
+        "BUTTON",
+        "設定を閉じる",
+        BS_PUSHBUTTON as u32 | WS_TABSTOP,
+        300,
+        12,
+        28,
+        28,
+    ),
+    (1000, "STATIC", "シーン", 0, 20, 76, 110, 26),
+    (
+        MODE_ID,
+        "COMBOBOX",
+        "",
+        CBS_DROPDOWNLIST as u32
+            | CBS_OWNERDRAWFIXED as u32
+            | CBS_HASSTRINGS as u32
+            | WS_TABSTOP
+            | WS_VSCROLL,
+        168,
+        68,
+        152,
+        160,
+    ),
+    (
+        1002,
+        "BUTTON",
+        "カーソルに反応",
+        BS_OWNERDRAW as u32 | WS_TABSTOP,
+        20,
+        118,
+        300,
+        36,
+    ),
+    (
+        1003,
+        "BUTTON",
+        "アイコンを避ける",
+        BS_OWNERDRAW as u32 | WS_TABSTOP,
+        20,
+        160,
+        300,
+        36,
+    ),
+    (
+        1004,
+        "BUTTON",
+        "省エネ",
+        BS_OWNERDRAW as u32 | WS_TABSTOP,
+        20,
+        202,
+        300,
+        36,
+    ),
+    (1005, "STATIC", "群れの大きさ", 0, 20, 254, 208, 26),
+    (1045, "STATIC", "240匹", 0, 234, 254, 86, 26),
+    (
+        COUNT_ID,
+        "msctls_trackbar32",
+        "",
+        TBS_NOTICKS | WS_TABSTOP,
+        20,
+        284,
+        300,
+        30,
+    ),
+    (1006, "STATIC", "なめらかさ", 0, 20, 330, 198, 26),
+    (1046, "STATIC", "30 FPS", 0, 222, 330, 98, 26),
+    (
+        FPS_ID,
+        "msctls_trackbar32",
+        "",
+        TBS_NOTICKS | WS_TABSTOP,
+        20,
+        360,
+        300,
+        30,
+    ),
+    (1008, "STATIC", "時間の速さ", 0, 20, 406, 198, 26),
+    (1047, "STATIC", "1.00×", 0, 222, 406, 98, 26),
+    (
+        TIME_ID,
+        "msctls_trackbar32",
+        "",
+        TBS_NOTICKS | WS_TABSTOP,
+        20,
+        436,
+        300,
+        30,
+    ),
+    (
+        QUIT_ID,
+        "BUTTON",
+        "終了",
+        BS_PUSHBUTTON as u32 | WS_TABSTOP,
+        20,
+        482,
+        100,
+        28,
+    ),
+];
 struct TrayContext {
     tx: Sender<Command>,
     settings: Arc<Mutex<Settings>>,
     icon: NOTIFYICONDATAW,
     taskbar: u32,
+    font: HFONT,
+    last_count: usize,
+    last_fps: u32,
+    last_time_scale: f32,
+    brush: HBRUSH,
 }
-unsafe fn add_item(menu: HMENU, id: usize, text: &str, checked: bool) {
-    AppendMenuW(
-        menu,
-        MF_STRING | if checked { MF_CHECKED } else { MF_UNCHECKED },
-        id,
-        wide(text).as_ptr(),
+unsafe fn layout_panel(hwnd: HWND, context: &mut TrayContext) {
+    let dpi = GetDpiForWindow(hwnd).max(96);
+    let scale = |n: i32| ((n as i64 * dpi as i64 + 48) / 96) as i32;
+    let new_font = CreateFontW(
+        -scale(15),
+        0,
+        0,
+        0,
+        FW_NORMAL as i32,
+        0,
+        0,
+        0,
+        DEFAULT_CHARSET as u32,
+        OUT_DEFAULT_PRECIS as u32,
+        CLIP_DEFAULT_PRECIS as u32,
+        DEFAULT_QUALITY as u32,
+        DEFAULT_PITCH as u32,
+        wide(panel::FONT_FAMILY).as_ptr(),
     );
+    for &(id, _, _, _, x, y, w, h) in &PANEL_CONTROLS {
+        let child = GetDlgItem(hwnd, id);
+        SetWindowPos(
+            child,
+            0,
+            scale(x),
+            scale(y),
+            scale(w),
+            scale(h),
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+        let font = if new_font != 0 {
+            new_font
+        } else {
+            GetStockObject(DEFAULT_GUI_FONT)
+        };
+        SendMessageW(child, WM_SETFONT, font as usize, 1);
+    }
+    let old_font = context.font;
+    context.font = new_font;
+    if old_font != 0 {
+        DeleteObject(old_font);
+    }
+    let mut rect = RECT {
+        left: 0,
+        top: 0,
+        right: scale(340),
+        bottom: scale(518),
+    };
+    AdjustWindowRectExForDpi(&mut rect, PANEL_STYLE, 0, PANEL_EXSTYLE, dpi);
+    SetWindowPos(
+        hwnd,
+        0,
+        0,
+        0,
+        rect.right - rect.left,
+        rect.bottom - rect.top,
+        SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+    );
+    panel::apply_frame(hwnd);
+}
+unsafe fn create_panel_controls(hwnd: HWND, module: HINSTANCE) -> bool {
+    let common = INITCOMMONCONTROLSEX {
+        dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
+        dwICC: ICC_BAR_CLASSES,
+    };
+    if InitCommonControlsEx(&common) == 0 {
+        return false;
+    }
+    for &(id, class, label, style, _, _, _, _) in &PANEL_CONTROLS {
+        let child = CreateWindowExW(
+            0,
+            wide(class).as_ptr(),
+            wide(label).as_ptr(),
+            WS_CHILD | WS_VISIBLE | style,
+            0,
+            0,
+            0,
+            0,
+            hwnd,
+            id as isize,
+            module,
+            null(),
+        );
+        if child == 0 || !panel::install(child, id) {
+            return false;
+        }
+    }
+    true
+}
+unsafe fn refresh_panel(hwnd: HWND, context: &mut TrayContext) {
+    let s = context.settings.lock().unwrap().clone();
+    for (id, checked) in [(1002, s.mouse), (1003, s.icons), (1004, s.power_saving)] {
+        SendMessageW(GetDlgItem(hwnd, id), BM_SETCHECK, usize::from(checked), 0);
+    }
+    let mut s = s;
+    s.normalize();
+    context.last_count = s.fish_count;
+    context.last_fps = s.fps;
+    context.last_time_scale = s.time_scale;
+    let mode = GetDlgItem(hwnd, MODE_ID);
+    SendMessageW(mode, CB_RESETCONTENT, 0, 0);
+    for (i, choice) in ModelMode::ALL.iter().enumerate() {
+        SendMessageW(
+            mode,
+            CB_ADDSTRING,
+            0,
+            wide(choice.label()).as_ptr() as isize,
+        );
+        if *choice == s.mode {
+            SendMessageW(mode, CB_SETCURSEL, i, 0);
+        }
+    }
+    for (id, min, max, pos, page) in [
+        (COUNT_ID, 1, 100, (s.fish_count / 10) as i32, 5),
+        (
+            FPS_ID,
+            0,
+            (FPS_CHOICES.len() - 1) as isize,
+            FPS_CHOICES.iter().position(|&v| v == s.fps).unwrap() as i32,
+            1,
+        ),
+        (TIME_ID, 0, 8, (s.time_scale * 4.0) as i32, 1),
+    ] {
+        let slider = GetDlgItem(hwnd, id);
+        SendMessageW(slider, TBM_SETRANGEMIN, 0, min);
+        SendMessageW(slider, TBM_SETRANGEMAX, 0, max);
+        SendMessageW(slider, TBM_SETLINESIZE, 0, 1);
+        SendMessageW(slider, TBM_SETPAGESIZE, 0, page);
+        SendMessageW(slider, TBM_SETPOS, 1, pos as isize);
+    }
+    update_slider_labels(hwnd);
+}
+unsafe fn slider_values(hwnd: HWND) -> (usize, u32) {
+    let count =
+        SendMessageW(GetDlgItem(hwnd, COUNT_ID), TBM_GETPOS, 0, 0).clamp(1, 100) as usize * 10;
+    let fps_index = SendMessageW(GetDlgItem(hwnd, FPS_ID), TBM_GETPOS, 0, 0)
+        .clamp(0, (FPS_CHOICES.len() - 1) as isize) as usize;
+    (count, FPS_CHOICES[fps_index])
+}
+unsafe fn slider_time_scale(hwnd: HWND) -> f32 {
+    SendMessageW(GetDlgItem(hwnd, TIME_ID), TBM_GETPOS, 0, 0).clamp(0, 8) as f32 / 4.0
+}
+unsafe fn set_label_if_changed(hwnd: HWND, id: i32, value: &str) {
+    let child = GetDlgItem(hwnd, id);
+    let mut current = [0u16; 128];
+    let len = GetWindowTextW(child, current.as_mut_ptr(), current.len() as i32).max(0) as usize;
+    let value = wide(value);
+    if current[..len] != value[..value.len() - 1] {
+        SetWindowTextW(child, value.as_ptr());
+    }
+}
+unsafe fn update_slider_labels(hwnd: HWND) {
+    let (count, fps) = slider_values(hwnd);
+    set_label_if_changed(hwnd, 1045, &format!("{count}匹"));
+    set_label_if_changed(hwnd, 1046, &format!("{fps} FPS"));
+    set_label_if_changed(hwnd, 1047, &format!("{:.2}×", slider_time_scale(hwnd)));
+}
+unsafe fn show_panel(hwnd: HWND, context: &mut TrayContext) {
+    refresh_panel(hwnd, context);
+    let mut point: POINT = zeroed();
+    GetCursorPos(&mut point);
+    let monitor = MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST);
+    let mut info: MONITORINFO = zeroed();
+    info.cbSize = size_of::<MONITORINFO>() as u32;
+    if GetMonitorInfoW(monitor, &mut info) != 0 {
+        // Moving first lets WM_DPICHANGED lay out controls for this monitor.
+        SetWindowPos(
+            hwnd,
+            0,
+            point.x,
+            point.y,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+        let mut rect: RECT = zeroed();
+        GetWindowRect(hwnd, &mut rect);
+        let width = rect.right - rect.left;
+        let height = rect.bottom - rect.top;
+        let x = point.x.clamp(
+            info.rcWork.left,
+            (info.rcWork.right - width).max(info.rcWork.left),
+        );
+        // Leave breathing room above the tray flyout/click position.
+        let gap = (48 * GetDpiForWindow(hwnd).max(96) / 96) as i32;
+        let y = (point.y - height - gap).clamp(
+            info.rcWork.top,
+            (info.rcWork.bottom - height).max(info.rcWork.top),
+        );
+        SetWindowPos(hwnd, HWND_TOP, x, y, 0, 0, SWP_NOSIZE | SWP_SHOWWINDOW);
+    } else {
+        ShowWindow(hwnd, SW_SHOW);
+    }
+    SetForegroundWindow(hwnd);
+    SetFocus(GetDlgItem(hwnd, 1002));
 }
 unsafe extern "system" fn tray_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
+    if msg == WM_DRAWITEM && w == MODE_ID as usize && l != 0 {
+        panel::scene_item(&*(l as *const windows_sys::Win32::UI::Controls::DRAWITEMSTRUCT));
+        return 1;
+    }
+    if msg == WM_ERASEBKGND {
+        return 1;
+    }
+    if msg == WM_PAINT {
+        let mut ps: PAINTSTRUCT = zeroed();
+        let dc = BeginPaint(hwnd, &mut ps);
+        panel::frame(hwnd, dc);
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    if msg == WM_PRINTCLIENT {
+        panel::frame(hwnd, w as HDC);
+        return 0;
+    }
+    if msg == WM_NCHITTEST {
+        let mut point = POINT {
+            x: (l as u32 & 0xffff) as i16 as i32,
+            y: ((l as u32 >> 16) & 0xffff) as i16 as i32,
+        };
+        ScreenToClient(hwnd, &mut point);
+        let dpi = GetDpiForWindow(hwnd).max(96) as i32;
+        let mut r: RECT = zeroed();
+        GetClientRect(hwnd, &mut r);
+        if point.y >= 0 && point.y < 56 * dpi / 96 && point.x < r.right - 48 * dpi / 96 {
+            return HTCAPTION as isize;
+        }
+        return HTCLIENT as isize;
+    }
+    if msg == WM_APP + 19 {
+        let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut TrayContext;
+        if !ptr.is_null() {
+            // Activate after Explorer finishes handling the tray click, allowing
+            // its notification overflow to dismiss on foreground change.
+            show_panel(hwnd, &mut *ptr);
+        }
+        return 0;
+    }
     if msg == WM_APP + 18 {
         PostQuitMessage(0);
         return 0;
@@ -377,55 +732,89 @@ unsafe extern "system" fn tray_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) 
             }
             return 1;
         }
-        if msg == TRAY_MSG && (l as u32 == WM_RBUTTONUP || l as u32 == WM_LBUTTONUP) {
-            let settings = context.settings.lock().unwrap().clone();
-            let menu = CreatePopupMenu();
-            add_item(menu, 0, "Living Wallpaper · Fish model", false);
-            AppendMenuW(menu, MF_SEPARATOR, 0, null());
-            add_item(menu, 1, "Pause", settings.paused);
-            add_item(menu, 2, "Mouse interaction", settings.mouse);
-            add_item(menu, 3, "Avoid desktop icons", settings.icons);
-            add_item(menu, 4, "Power saving", settings.power_saving);
-            AppendMenuW(menu, MF_SEPARATOR, 0, null());
-            for (id, n) in [(10, 120), (11, 240), (12, 500), (13, 1000)] {
-                add_item(menu, id, &format!("Fish: {n}"), settings.fish_count == n);
+        if matches!(msg, WM_CTLCOLORLISTBOX | WM_CTLCOLOREDIT) {
+            SetTextColor(w as HDC, 0x00f5e7d5);
+            SetBkColor(w as HDC, 0x00583917);
+            return context.brush;
+        }
+        if msg == WM_CLOSE {
+            ShowWindow(hwnd, SW_HIDE);
+            return 0;
+        }
+        if msg == WM_DPICHANGED {
+            layout_panel(hwnd, context);
+            return 0;
+        }
+        if msg == WM_HSCROLL
+            && (l == GetDlgItem(hwnd, COUNT_ID)
+                || l == GetDlgItem(hwnd, FPS_ID)
+                || l == GetDlgItem(hwnd, TIME_ID))
+        {
+            update_slider_labels(hwnd);
+            // Preview values during drag; commit once released (keyboard and
+            // page steps commit immediately), avoiding repeated disk writes.
+            if (w & 0xffff) as u32 != TB_THUMBTRACK {
+                let (count, fps) = slider_values(hwnd);
+                if l == GetDlgItem(hwnd, COUNT_ID) && count != context.last_count {
+                    context.last_count = count;
+                    let _ = context.tx.send(Command::Count(count));
+                }
+                if l == GetDlgItem(hwnd, FPS_ID) && fps != context.last_fps {
+                    context.last_fps = fps;
+                    let _ = context.tx.send(Command::Fps(fps));
+                }
+                let time_scale = slider_time_scale(hwnd);
+                if l == GetDlgItem(hwnd, TIME_ID) && time_scale != context.last_time_scale {
+                    context.last_time_scale = time_scale;
+                    let _ = context.tx.send(Command::TimeScale(time_scale));
+                }
             }
-            for (id, n) in [(20, 15), (21, 30), (22, 60)] {
-                add_item(menu, id, &format!("FPS: {n}"), settings.fps == n);
+            return 0;
+        }
+        if msg == WM_COMMAND {
+            let id = (w & 0xffff) as i32;
+            let notice = ((w >> 16) & 0xffff) as u32;
+            if id == MODE_ID && notice == CBN_DROPDOWN {
+                panel::style_scene_list(GetDlgItem(hwnd, MODE_ID));
+                return 0;
             }
-            AppendMenuW(menu, MF_SEPARATOR, 0, null());
-            add_item(menu, 99, "Quit", false);
-            let mut point: POINT = zeroed();
-            GetCursorPos(&mut point);
-            SetForegroundWindow(hwnd);
-            let id = TrackPopupMenu(
-                menu,
-                TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON,
-                point.x,
-                point.y,
-                0,
-                hwnd,
-                null(),
-            );
-            DestroyMenu(menu);
-            PostMessageW(hwnd, WM_NULL, 0, 0);
-            let command = match id {
-                1 => Some(Command::Pause),
-                2 => Some(Command::Mouse),
-                3 => Some(Command::Icons),
-                4 => Some(Command::Power),
-                10 => Some(Command::Count(120)),
-                11 => Some(Command::Count(240)),
-                12 => Some(Command::Count(500)),
-                13 => Some(Command::Count(1000)),
-                20 => Some(Command::Fps(15)),
-                21 => Some(Command::Fps(30)),
-                22 => Some(Command::Fps(60)),
-                99 => Some(Command::Quit),
+            if id == IDCANCEL || id == panel::CLOSE_ID {
+                ShowWindow(hwnd, SW_HIDE);
+                return 0;
+            }
+            if (1002..=1004).contains(&id) && notice == BN_CLICKED {
+                let control = GetDlgItem(hwnd, id);
+                let checked = SendMessageW(control, BM_GETCHECK, 0, 0) != 0;
+                SendMessageW(control, BM_SETCHECK, usize::from(!checked), 0);
+            }
+            let command = match (id, notice) {
+                (1002, BN_CLICKED) => Some(Command::Mouse),
+                (1003, BN_CLICKED) => Some(Command::Icons),
+                (1004, BN_CLICKED) => Some(Command::Power),
+                (MODE_ID, CBN_SELCHANGE) => {
+                    let index = SendMessageW(GetDlgItem(hwnd, MODE_ID), CB_GETCURSEL, 0, 0);
+                    ModelMode::ALL
+                        .get(index as usize)
+                        .copied()
+                        .map(Command::Mode)
+                }
+                (QUIT_ID, BN_CLICKED) => {
+                    ShowWindow(hwnd, SW_HIDE);
+                    Some(Command::Quit)
+                }
                 _ => None,
             };
             if let Some(command) = command {
                 let _ = context.tx.send(command);
+            }
+            // A setting change does not hide or destroy the panel.
+            return 0;
+        }
+        if msg == TRAY_MSG && (l as u32 == WM_RBUTTONUP || l as u32 == WM_LBUTTONUP) {
+            if IsWindowVisible(hwnd) != 0 {
+                ShowWindow(hwnd, SW_HIDE);
+            } else {
+                PostMessageW(hwnd, WM_APP + 19, 0, 0);
             }
             return 0;
         }
@@ -438,20 +827,29 @@ pub fn start_tray(
 ) -> anyhow::Result<TrayGuard> {
     let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
     let thread = std::thread::spawn(move || unsafe {
+        let _panel_font = match panel::FontResource::load() {
+            Ok(font) => font,
+            Err(error) => {
+                crate::log(error.to_string());
+                let _ = ready_tx.send(0);
+                return;
+            }
+        };
         let module = GetModuleHandleW(null());
         let class = wide("LivingWallpaperTray");
         let wc = WNDCLASSW {
             lpfnWndProc: Some(tray_proc),
             hInstance: module,
             lpszClassName: class.as_ptr(),
+            hbrBackground: 0,
             ..zeroed()
         };
         RegisterClassW(&wc);
         let hwnd = CreateWindowExW(
-            WS_EX_TOOLWINDOW,
+            PANEL_EXSTYLE,
             class.as_ptr(),
-            wide("Living Wallpaper settings").as_ptr(),
-            WS_POPUP,
+            wide("Living Wallpaper").as_ptr(),
+            PANEL_STYLE,
             0,
             0,
             0,
@@ -471,7 +869,14 @@ pub fn start_tray(
         icon.uID = 1;
         icon.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
         icon.uCallbackMessage = TRAY_MSG;
-        icon.hIcon = LoadIconW(0, IDI_APPLICATION);
+        icon.hIcon = LoadImageW(
+            module,
+            2usize as *const u16,
+            IMAGE_ICON,
+            GetSystemMetrics(SM_CXSMICON),
+            GetSystemMetrics(SM_CYSMICON),
+            LR_SHARED,
+        ) as HICON;
         let tip = wide("Living Wallpaper · click for settings");
         icon.szTip[..tip.len()].copy_from_slice(&tip);
         let mut context = Box::new(TrayContext {
@@ -479,22 +884,38 @@ pub fn start_tray(
             settings,
             icon,
             taskbar: RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()),
+            font: 0,
+            last_count: 0,
+            last_fps: 0,
+            last_time_scale: 0.0,
+            brush: CreateSolidBrush(0x00583917),
         });
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, &mut *context as *mut _ as isize);
+        let controls_ready = create_panel_controls(hwnd, module);
+        if controls_ready {
+            layout_panel(hwnd, &mut context);
+            refresh_panel(hwnd, &mut context);
+        }
         WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION);
-        let added = Shell_NotifyIconW(NIM_ADD, &context.icon) != 0;
+        let added = controls_ready && Shell_NotifyIconW(NIM_ADD, &context.icon) != 0;
         let _ = ready_tx.send(if added { hwnd } else { 0 });
         if added {
             let mut msg: MSG = zeroed();
             while GetMessageW(&mut msg, 0, 0, 0) > 0 {
-                TranslateMessage(&msg);
-                DispatchMessageW(&msg);
+                if IsWindowVisible(hwnd) == 0 || IsDialogMessageW(hwnd, &msg) == 0 {
+                    TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
             }
         }
         Shell_NotifyIconW(NIM_DELETE, &context.icon);
         WTSUnRegisterSessionNotification(hwnd);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
         DestroyWindow(hwnd);
+        if context.font != 0 {
+            DeleteObject(context.font);
+        }
+        DeleteObject(context.brush);
     });
     let hwnd = ready_rx
         .recv_timeout(std::time::Duration::from_secs(5))
@@ -504,4 +925,207 @@ pub fn start_tray(
         hwnd,
         thread: Some(thread),
     })
+}
+
+#[cfg(test)]
+mod panel_tests {
+    use super::*;
+    use windows_sys::Win32::UI::Controls::TB_ENDTRACK;
+    #[test]
+    fn repeated_panel_commands_keep_window_alive_and_close_does_not_quit() {
+        unsafe {
+            let _panel_font = panel::FontResource::load().unwrap();
+            let module = GetModuleHandleW(null());
+            let class = wide("LivingWallpaperPanelTest");
+            let wc = WNDCLASSW {
+                lpfnWndProc: Some(tray_proc),
+                hInstance: module,
+                lpszClassName: class.as_ptr(),
+                hbrBackground: 0,
+                ..zeroed()
+            };
+            assert_ne!(RegisterClassW(&wc), 0);
+            let hwnd = CreateWindowExW(
+                PANEL_EXSTYLE,
+                class.as_ptr(),
+                wide("Panel test").as_ptr(),
+                PANEL_STYLE,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                module,
+                null(),
+            );
+            assert_ne!(hwnd, 0);
+            let (tx, rx) = std::sync::mpsc::channel();
+            let mut context = Box::new(TrayContext {
+                tx,
+                settings: Arc::new(Mutex::new(Settings {
+                    fish_count: 333,
+                    fps: 24,
+                    ..Settings::default()
+                })),
+                icon: zeroed(),
+                taskbar: WM_APP + 200,
+                font: 0,
+                last_count: 0,
+                last_fps: 0,
+                last_time_scale: 0.0,
+                brush: CreateSolidBrush(0x00583917),
+            });
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, &mut *context as *mut _ as isize);
+            assert!(create_panel_controls(hwnd, module));
+            layout_panel(hwnd, &mut context);
+            refresh_panel(hwnd, &mut context);
+            // Verify GDI actually selected the bundled face, not a fallback.
+            let dc = GetDC(hwnd);
+            let old = SelectObject(dc, context.font);
+            let mut face = [0u16; 64];
+            let len = GetTextFaceW(dc, face.len() as i32, face.as_mut_ptr());
+            assert!(len > 0);
+            let end = face.iter().position(|&v| v == 0).unwrap_or(face.len());
+            assert_eq!(String::from_utf16_lossy(&face[..end]), panel::FONT_FAMILY);
+            SelectObject(dc, old);
+            ReleaseDC(hwnd, dc);
+            assert_eq!(slider_values(hwnd), (330, 30));
+            assert_ne!(GetDlgItem(hwnd, panel::CLOSE_ID), 0);
+            assert_eq!(GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_CAPTION as isize, 0);
+            SendMessageW(
+                hwnd,
+                WM_COMMAND,
+                panel::CLOSE_ID as usize,
+                GetDlgItem(hwnd, panel::CLOSE_ID),
+            );
+            assert_ne!(IsWindow(hwnd), 0, "custom top-right close must only hide");
+            assert!(rx.try_recv().is_err(), "custom close must not quit");
+            if let Some(path) = std::env::var_os("LIVING_WALLPAPER_UI_CAPTURE") {
+                panel::capture_for_test(hwnd, std::path::Path::new(&path));
+            }
+            assert_eq!(GetDlgItem(hwnd, 1007), 0, "FPS legend must be removed");
+            assert_eq!(
+                SendMessageW(GetDlgItem(hwnd, MODE_ID), CB_GETCOUNT, 0, 0),
+                1
+            );
+            assert_eq!(GetDlgItem(hwnd, 1001), 0, "pause checkbox must be removed");
+            assert_eq!(
+                GetDlgItem(hwnd, IDCANCEL),
+                0,
+                "bottom close button must be removed"
+            );
+            SendMessageW(hwnd, WM_COMMAND, 1002, GetDlgItem(hwnd, 1002));
+            SendMessageW(hwnd, WM_COMMAND, 1003, GetDlgItem(hwnd, 1003));
+            assert!(matches!(rx.try_recv(), Ok(Command::Mouse)));
+            assert!(matches!(rx.try_recv(), Ok(Command::Icons)));
+            assert_ne!(IsWindow(hwnd), 0, "setting changes destroyed the panel");
+            let toggle = GetDlgItem(hwnd, 1002);
+            let initial = SendMessageW(toggle, BM_GETCHECK, 0, 0);
+            // Windows reports the second rapid press as a double-click message.
+            let point = (12 << 16) | 12;
+            for press in [WM_LBUTTONDOWN, WM_LBUTTONDBLCLK] {
+                SendMessageW(toggle, press, 1, point);
+                SendMessageW(toggle, WM_LBUTTONUP, 0, point);
+                assert!(
+                    matches!(rx.try_recv(), Ok(Command::Mouse)),
+                    "every rapid click must toggle, including double-click presses"
+                );
+                assert!(rx.try_recv().is_err(), "one click must send one command");
+            }
+            assert_eq!(SendMessageW(toggle, BM_GETCHECK, 0, 0), initial);
+            let count = GetDlgItem(hwnd, COUNT_ID);
+            SendMessageW(count, TBM_SETPOS, 1, 25);
+            SendMessageW(hwnd, WM_HSCROLL, TB_THUMBTRACK as usize, count);
+            assert!(
+                rx.try_recv().is_err(),
+                "drag should not repeatedly save settings"
+            );
+            SendMessageW(hwnd, WM_HSCROLL, TB_ENDTRACK as usize, count);
+            assert!(matches!(rx.try_recv(), Ok(Command::Count(250))));
+            SendMessageW(hwnd, WM_HSCROLL, TB_ENDTRACK as usize, count);
+            assert!(
+                rx.try_recv().is_err(),
+                "duplicate release should not save again"
+            );
+            let fps = GetDlgItem(hwnd, FPS_ID);
+            for (i, value) in FPS_CHOICES.iter().enumerate() {
+                SendMessageW(fps, TBM_SETPOS, 1, i as isize);
+                SendMessageW(hwnd, WM_HSCROLL, TB_ENDTRACK as usize, fps);
+                assert!(matches!(rx.try_recv(),Ok(Command::Fps(n)) if n==*value));
+            }
+            let time_slider = GetDlgItem(hwnd, TIME_ID);
+            for i in 0..=8 {
+                SendMessageW(time_slider, TBM_SETPOS, 1, i);
+                SendMessageW(hwnd, WM_HSCROLL, TB_ENDTRACK as usize, time_slider);
+                assert!(
+                    matches!(rx.try_recv(),Ok(Command::TimeScale(value)) if value==i as f32/4.0)
+                );
+            }
+            SendMessageW(time_slider, TBM_SETPOS, 1, 6);
+            SendMessageW(hwnd, WM_HSCROLL, TB_THUMBTRACK as usize, time_slider);
+            assert!(rx.try_recv().is_err());
+            SendMessageW(hwnd, WM_HSCROLL, TB_ENDTRACK as usize, time_slider);
+            assert!(matches!(rx.try_recv(), Ok(Command::TimeScale(1.5))));
+            // Drive actual control input, rather than only synthetic parent
+            // notifications. Motion within one detent must still move the thumb.
+            SendMessageW(time_slider, TBM_SETPOS, 0, 0);
+            let dpi = GetDpiForWindow(time_slider).max(96) as i32;
+            let px = |v: i32| (v * dpi + 48) / 96;
+            let point = |x: i32| ((px(15) as u32) << 16 | (x as u32 & 0xffff)) as isize;
+            SendMessageW(time_slider, WM_LBUTTONDOWN, 1, point(px(10)));
+            SendMessageW(time_slider, WM_MOUSEMOVE, 1, point(px(22)));
+            assert_eq!(SendMessageW(time_slider, TBM_GETPOS, 0, 0), 0);
+            panel::assert_thumb_pixel_for_test(time_slider, px(27));
+            assert!(
+                rx.try_recv().is_err(),
+                "pointer motion must not save settings"
+            );
+            // Dragging beyond each end clamps the value; losing capture commits
+            // exactly once, even if a later release message arrives.
+            SendMessageW(time_slider, WM_MOUSEMOVE, 1, point(px(400)));
+            assert_eq!(SendMessageW(time_slider, TBM_GETPOS, 0, 0), 8);
+            SendMessageW(time_slider, WM_MOUSEMOVE, 1, point(-px(40)));
+            assert_eq!(SendMessageW(time_slider, TBM_GETPOS, 0, 0), 0);
+            SendMessageW(time_slider, WM_CAPTURECHANGED, 0, 0);
+            assert!(matches!(rx.try_recv(), Ok(Command::TimeScale(0.0))));
+            SendMessageW(time_slider, WM_LBUTTONUP, 0, point(px(10)));
+            assert!(rx.try_recv().is_err());
+            SendMessageW(
+                time_slider,
+                WM_KEYDOWN,
+                windows_sys::Win32::UI::Input::KeyboardAndMouse::VK_RIGHT as usize,
+                0,
+            );
+            assert!(matches!(rx.try_recv(), Ok(Command::TimeScale(0.25))));
+            let mut value = [0u16; 32];
+            let len = GetWindowTextW(GetDlgItem(hwnd, 1047), value.as_mut_ptr(), 32);
+            assert_eq!(String::from_utf16_lossy(&value[..len as usize]), "0.25×");
+            let mode = GetDlgItem(hwnd, MODE_ID);
+            SendMessageW(
+                hwnd,
+                WM_COMMAND,
+                MODE_ID as usize | ((CBN_SELCHANGE as usize) << 16),
+                mode,
+            );
+            assert!(matches!(rx.try_recv(), Ok(Command::Mode(ModelMode::Fish))));
+            SendMessageW(hwnd, WM_CLOSE, 0, 0);
+            assert_ne!(
+                IsWindow(hwnd),
+                0,
+                "close must hide, preserving the tray window"
+            );
+            assert!(
+                rx.try_recv().is_err(),
+                "closing settings must not quit the app"
+            );
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+            DestroyWindow(hwnd);
+            if context.font != 0 {
+                DeleteObject(context.font);
+            }
+            DeleteObject(context.brush);
+            UnregisterClassW(class.as_ptr(), module);
+        }
+    }
 }

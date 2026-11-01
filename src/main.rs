@@ -4,6 +4,7 @@
 )]
 mod platform;
 mod renderer;
+mod scene_time;
 mod settings;
 mod simulation;
 use anyhow::Context;
@@ -55,6 +56,11 @@ fn main() {
         std::process::exit(1);
     }
 }
+fn create_model(mode: settings::ModelMode) -> Box<dyn SchoolModel> {
+    match mode {
+        settings::ModelMode::Fish => Box::<simulation::FishSchool>::default(),
+    }
+}
 fn run() -> anyhow::Result<()> {
     let _instance = platform::single_instance()?;
     let args: Vec<_> = std::env::args().collect();
@@ -83,12 +89,13 @@ fn run() -> anyhow::Result<()> {
     let settings = Arc::new(Mutex::new(settings::Settings::load()));
     let (tx, rx) = mpsc::channel();
     let _tray = platform::start_tray(tx, settings.clone())?;
-    let mut model: Box<dyn SchoolModel> = Box::<simulation::FishSchool>::default();
+    let mut model = create_model(settings.lock().unwrap().mode);
     let mut pointer = Pointer::default();
     let mut previous_cursor = None;
     let mut obstacles = Vec::new();
     let mut last_icons = Instant::now() - Duration::from_secs(3);
     let start = Instant::now();
+    let mut scene_clock = scene_time::SceneClock::default();
     let mut last_frame = Instant::now();
     let mut next_frame = Instant::now();
     let mut last_health = Instant::now();
@@ -109,7 +116,7 @@ fn run() -> anyhow::Result<()> {
             let now=Instant::now();
             for command in rx.try_iter() {
                 use platform::Command::*; let mut s=settings.lock().unwrap();
-                match command { Pause=>s.paused=!s.paused,Mouse=>s.mouse=!s.mouse,Icons=>s.icons=!s.icons,Power=>s.power_saving=!s.power_saving,Count(n)=>s.fish_count=n,Fps(n)=>s.fps=n,Quit=>target.exit() }
+                match command { Mouse=>s.mouse=!s.mouse,Icons=>s.icons=!s.icons,Power=>s.power_saving=!s.power_saving,Count(n)=>s.fish_count=n,Fps(n)=>s.fps=n,TimeScale(value)=>s.time_scale=settings::normalize_time_scale(value),Mode(mode)=>{if s.mode!=mode {s.mode=mode;model=create_model(mode);}},Quit=>target.exit() }
                 if let Err(e)=s.save() { log(format!("Settings save failed: {e}")); }
                 next_frame=now;
             }
@@ -122,7 +129,7 @@ fn run() -> anyhow::Result<()> {
             if now>=next_frame {
                 let size=window.inner_size(); let bounds=Vec2::new(size.width as f32,size.height as f32);
                 let env=platform::environment(hwnd);
-                let paused=s.paused || size.width==0 || size.height==0 || (s.power_saving && (env.suspended || (!preview && env.fullscreen)));
+                let paused=s.fps==0 || s.time_scale==0.0 || size.width==0 || size.height==0 || (s.power_saving && (env.suspended || (!preview && env.fullscreen)));
                 let fps=if paused {2} else if s.power_saving && env.battery {s.fps.min(15)} else {s.fps};
                 let dt=now.duration_since(last_frame).as_secs_f32(); last_frame=now;
                 if let Some(cursor)=env.cursor {
@@ -132,15 +139,15 @@ fn run() -> anyhow::Result<()> {
                     pointer.position=cursor; previous_cursor=Some(cursor);
                     pointer.enabled=s.mouse && cursor.cmpge(Vec2::ZERO).all() && cursor.cmple(bounds).all();
                 } else { pointer.enabled=false; }
+                let plan=scene_clock.advance(dt,s.time_scale,paused);
                 if !paused {
                     if s.icons && !preview && last_icons.elapsed()>Duration::from_secs(2) {
                         last_icons=now;
                         match platform::icons(hwnd) { Ok(rects)=>{ obstacles=rects; },Err(e)=>{obstacles.clear();let message=e.to_string();if message!=last_icon_error {log(format!("Icon avoidance unavailable: {message}"));last_icon_error=message;} } }
                     }
                     model.resize_population(s.fish_count,bounds);
-                    let elapsed=dt.min(0.10); let steps=(elapsed/(1.0/60.0)).ceil().max(1.0) as u32;
-                    for _ in 0..steps { model.step(elapsed/steps as f32,bounds,if s.icons {&obstacles} else {&[]},pointer); }
-                    match renderer.render(model.fish(),start.elapsed().as_secs_f32()) {
+                    for _ in 0..plan.steps { model.step(plan.step_dt,bounds,if s.icons {&obstacles} else {&[]},pointer); }
+                    match renderer.render(model.fish(),scene_clock.seconds()) {
                         Ok(())=>frames+=1,
                         Err(wgpu::SurfaceError::Lost|wgpu::SurfaceError::Outdated)=>renderer.resize(size.width,size.height),
                         Err(wgpu::SurfaceError::OutOfMemory)=>{log("GPU out of memory");target.exit();},

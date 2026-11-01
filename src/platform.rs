@@ -3,12 +3,13 @@ use glam::Vec2;
 use std::sync::{mpsc::Sender, Arc, Mutex};
 #[derive(Clone, Copy, Debug)]
 pub enum Command {
-    Pause,
     Mouse,
     Icons,
     Power,
+    Mode(crate::settings::ModelMode),
     Count(usize),
     Fps(u32),
+    TimeScale(f32),
     Quit,
 }
 #[derive(Default)]
