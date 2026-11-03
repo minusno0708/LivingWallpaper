@@ -743,6 +743,21 @@ unsafe fn paint_control(hwnd: HWND, dc: HDC, state: &ControlState) {
                 s(1),
             );
         }
+        RESET_ID => {
+            round(
+                dc,
+                RECT {
+                    left: 1,
+                    top: 1,
+                    right: r.right - 1,
+                    bottom: r.bottom - 1,
+                },
+                rgb(23, 57, 78),
+                if focused { ACCENT } else { EDGE },
+                s(12),
+            );
+            text(dc, &label, r, MUTED, DT_CENTER);
+        }
         QUIT_ID => {
             if focused {
                 round(

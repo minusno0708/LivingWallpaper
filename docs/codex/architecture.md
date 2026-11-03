@@ -55,3 +55,8 @@ Zen Kaku Gothic New RegularをEXEへ埋め込み、AddFontMemResourceExでプロ
 設定はLOCALAPPDATA配下。旧FishSchoolWallpaperの設定があり新設定がない場合に引き継ぐ。旧paused=trueはFPS=0へ移行し、pausedを再保存しない。新項目がない旧設定は時間倍率1・全モニター有効として扱う。
 
 個人情報・端末情報はGit管理外のdocs/localへ置く。公開用EXEはbuild.ps1の検査を通す。READMEのGIFはアプリの実行時依存ではなく、READMEをローカルでも表示するため配布へ同梱する。macOSのOS連携はスタブ。
+
+
+## Plant追加開発（2026-11-01）
+
+feat/plant-sceneで実装中。雨による発芽・水分補充、草花と木の長期成長、自然な種の拡散、枯れない世代更新、庭の保存を追加。成長時計は描画停止と独立し、全画面で隠れていても進む。0倍率・終了中・Fish選択中は進めない。十分な水分で草花1時間・木24時間、乾燥時は5%の速度。仕様・初期値・制約は[plant-scene.md](plant-scene.md)を参照。src/plant.rsとplant.wgslはFishのモデル・描画から分離する。mainやv1.0.0へ反映済みとは扱わない。

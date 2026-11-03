@@ -45,3 +45,10 @@ READMEのGIFは現在のシミュレーションとシェーダーによるオ�
 ## 引き継ぎ
 
 [requirements.md](requirements.md)の要件と[architecture.md](architecture.md)の境界を維持する。個人・端末情報はGit管理外の `docs/local/` に分離する。新しい環境の手順は[development.md](development.md)、検証結果は[validation.md](validation.md)へ記録する。
+
+
+## Plant追加開発（2026-11-01）
+
+feat/plant-sceneで実装中。雨による発芽・水分補充、草花と木の長期成長、自然な種の拡散、枯れない世代更新、庭の保存を追加。成長時計は描画停止と独立し、全画面で隠れていても進む。0倍率・終了中・Fish選択中は進めない。十分な水分で草花1時間・木24時間、乾燥時は5%の速度。仕様・初期値・制約は[plant-scene.md](plant-scene.md)を参照。src/plant.rsとplant.wgslはFishのモデル・描画から分離する。mainやv1.0.0へ反映済みとは扱わない。
+
+Plant追加調整（2026-11-03）: 高速デバッグ育成は通常の庭と分離した保存先を使用。雲は各画面で最大1群、待ち時間と移動速度にばらつきを付け、自然雨で給水する。手動給水は左ボタンを押している間のみカーソルに追従し、給水半径30px。木は楕円の樹冠が拡大する方式を維持する。自然雨の追加給水は描画更新中のみ。詳細と制約はplant-scene.mdを参照。

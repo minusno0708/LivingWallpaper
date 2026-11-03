@@ -19,7 +19,12 @@ use windows_sys::Win32::{
         Diagnostics::Debug::*, LibraryLoader::*, Memory::*, Power::*, RemoteDesktop::*,
         Threading::*,
     },
-    UI::{HiDpi::*, Input::KeyboardAndMouse::SetFocus, Shell::*, WindowsAndMessaging::*},
+    UI::{
+        HiDpi::*,
+        Input::KeyboardAndMouse::{GetAsyncKeyState, SetFocus, VK_LBUTTON},
+        Shell::*,
+        WindowsAndMessaging::*,
+    },
 };
 
 fn wide(s: &str) -> Vec<u16> {
@@ -252,7 +257,16 @@ static SLEEPING: AtomicBool = AtomicBool::new(false);
 pub fn environment(wallpaper: isize) -> Environment {
     unsafe {
         let mut p: POINT = zeroed();
+        let down = (GetAsyncKeyState(VK_LBUTTON as i32) as u16) & 0x8000 != 0;
+        let mut water_held = false;
         let cursor = if GetCursorPos(&mut p) != 0 {
+            let hit = WindowFromPoint(p);
+            let root = GetAncestor(hit, GA_ROOT);
+            let mut class = [0u16; 64];
+            GetClassNameW(root, class.as_mut_ptr(), 64);
+            let class = String::from_utf16_lossy(&class);
+            let class = class.trim_end_matches('\0');
+            water_held = down && (root == wallpaper || class == "Progman" || class == "WorkerW");
             ScreenToClient(wallpaper, &mut p);
             Some(Vec2::new(p.x as f32, p.y as f32))
         } else {
@@ -285,6 +299,7 @@ pub fn environment(wallpaper: isize) -> Environment {
         }
         Environment {
             cursor,
+            water_held,
             battery,
             fullscreen,
             suspended: LOCKED.load(Ordering::Relaxed) || SLEEPING.load(Ordering::Relaxed),
@@ -337,8 +352,9 @@ const COUNT_ID: i32 = 1010;
 const FPS_ID: i32 = 1020;
 const TIME_ID: i32 = 1050;
 const QUIT_ID: i32 = 1099;
+const RESET_ID: i32 = 1098;
 // id, class, label, style, x, y, width, height (96-DPI logical pixels).
-const PANEL_CONTROLS: [(i32, &str, &str, u32, i32, i32, i32, i32); 17] = [
+const PANEL_CONTROLS: [(i32, &str, &str, u32, i32, i32, i32, i32); 18] = [
     (1040, "STATIC", "Living Wallpaper", 0, 50, 16, 236, 28),
     (
         panel::CLOSE_ID,
@@ -430,6 +446,16 @@ const PANEL_CONTROLS: [(i32, &str, &str, u32, i32, i32, i32, i32); 17] = [
         436,
         300,
         30,
+    ),
+    (
+        RESET_ID,
+        "BUTTON",
+        "庭をリセット",
+        BS_OWNERDRAW as u32 | WS_TABSTOP,
+        20,
+        286,
+        300,
+        28,
     ),
     (
         QUIT_ID,
@@ -634,6 +660,25 @@ unsafe fn refresh_panel(hwnd: HWND, context: &mut TrayContext) {
     }
     let mut s = s;
     s.normalize();
+    ShowWindow(
+        GetDlgItem(hwnd, RESET_ID),
+        if s.mode == ModelMode::Plant {
+            SW_SHOW
+        } else {
+            SW_HIDE
+        },
+    );
+    for id in [1003, 1005, 1045, COUNT_ID] {
+        ShowWindow(
+            GetDlgItem(hwnd, id),
+            if s.mode == ModelMode::Fish {
+                SW_SHOW
+            } else {
+                SW_HIDE
+            },
+        );
+    }
+
     context.last_count = s.fish_count;
     context.last_fps = s.fps;
     context.last_time_scale = s.time_scale;
@@ -668,7 +713,7 @@ unsafe fn refresh_panel(hwnd: HWND, context: &mut TrayContext) {
         SendMessageW(slider, TBM_SETPAGESIZE, 0, page);
         SendMessageW(slider, TBM_SETPOS, 1, pos as isize);
     }
-    update_slider_labels(hwnd);
+    refresh_time_slider(hwnd, context);
 }
 unsafe fn slider_values(hwnd: HWND) -> (usize, u32) {
     let count =
@@ -677,8 +722,53 @@ unsafe fn slider_values(hwnd: HWND) -> (usize, u32) {
         .clamp(0, (FPS_CHOICES.len() - 1) as isize) as usize;
     (count, FPS_CHOICES[fps_index])
 }
+unsafe fn plant_debug_controls(hwnd: HWND) -> bool {
+    let index = SendMessageW(GetDlgItem(hwnd, MODE_ID), CB_GETCURSEL, 0, 0);
+    crate::debug_options::enabled() && ModelMode::ALL.get(index as usize) == Some(&ModelMode::Plant)
+}
+unsafe fn refresh_time_slider(hwnd: HWND, context: &mut TrayContext) {
+    let debug = plant_debug_controls(hwnd);
+    let value = if debug {
+        crate::debug_options::speed() as f32
+    } else {
+        context.settings.lock().unwrap().time_scale
+    };
+    let slider = GetDlgItem(hwnd, TIME_ID);
+    let max = if debug {
+        (crate::debug_options::SPEEDS.len() - 1) as isize
+    } else {
+        8
+    };
+    let position = if debug {
+        crate::debug_options::SPEEDS
+            .iter()
+            .position(|&v| v == value as u32)
+            .unwrap_or(1) as isize
+    } else {
+        (value * 4.0) as isize
+    };
+    SendMessageW(slider, TBM_SETRANGEMIN, 0, 0);
+    SendMessageW(slider, TBM_SETRANGEMAX, 0, max);
+    SendMessageW(slider, TBM_SETPOS, 1, position);
+    context.last_time_scale = value;
+    set_label_if_changed(
+        hwnd,
+        1008,
+        if debug {
+            "育成速度（デバッグ）"
+        } else {
+            "時間の速さ"
+        },
+    );
+    update_slider_labels(hwnd);
+}
 unsafe fn slider_time_scale(hwnd: HWND) -> f32 {
-    SendMessageW(GetDlgItem(hwnd, TIME_ID), TBM_GETPOS, 0, 0).clamp(0, 8) as f32 / 4.0
+    let index = SendMessageW(GetDlgItem(hwnd, TIME_ID), TBM_GETPOS, 0, 0);
+    if plant_debug_controls(hwnd) {
+        crate::debug_options::SPEEDS[index.clamp(0, 7) as usize] as f32
+    } else {
+        index.clamp(0, 8) as f32 / 4.0
+    }
 }
 unsafe fn set_label_if_changed(hwnd: HWND, id: i32, value: &str) {
     let child = GetDlgItem(hwnd, id);
@@ -693,7 +783,16 @@ unsafe fn update_slider_labels(hwnd: HWND) {
     let (count, fps) = slider_values(hwnd);
     set_label_if_changed(hwnd, 1045, &format!("{count}匹"));
     set_label_if_changed(hwnd, 1046, &format!("{fps} FPS"));
-    set_label_if_changed(hwnd, 1047, &format!("{:.2}×", slider_time_scale(hwnd)));
+    let value = slider_time_scale(hwnd);
+    set_label_if_changed(
+        hwnd,
+        1047,
+        &if plant_debug_controls(hwnd) {
+            format!("{value:.0}×")
+        } else {
+            format!("{value:.2}×")
+        },
+    );
 }
 unsafe fn show_panel(hwnd: HWND, context: &mut TrayContext) {
     refresh_panel(hwnd, context);
@@ -875,10 +974,30 @@ unsafe extern "system" fn tray_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) 
                 (1004, BN_CLICKED) => Some(Command::Power),
                 (MODE_ID, CBN_SELCHANGE) => {
                     let index = SendMessageW(GetDlgItem(hwnd, MODE_ID), CB_GETCURSEL, 0, 0);
+                    if let Some(mode) = ModelMode::ALL.get(index as usize) {
+                        ShowWindow(GetDlgItem(hwnd,RESET_ID),if *mode==ModelMode::Plant {SW_SHOW}else{SW_HIDE});
+                        for id in [1003, 1005, 1045, COUNT_ID] {
+                            ShowWindow(
+                                GetDlgItem(hwnd, id),
+                                if *mode == ModelMode::Fish {
+                                    SW_SHOW
+                                } else {
+                                    SW_HIDE
+                                },
+                            );
+                        }
+                    }
+                    refresh_time_slider(hwnd,context);
                     ModelMode::ALL
                         .get(index as usize)
                         .copied()
                         .map(Command::Mode)
+                }
+                (RESET_ID,BN_CLICKED)=>{
+                    if SendMessageW(GetDlgItem(hwnd,MODE_ID),CB_GETCURSEL,0,0)==1 &&
+                        MessageBoxW(hwnd,wide("全モニターの庭をリセットしますか？\n植物・種・水分・成長状態が消去されます。設定は維持されます。").as_ptr(),wide("庭をリセット").as_ptr(),MB_YESNO|MB_ICONQUESTION|MB_DEFBUTTON2)==IDYES {
+                        Some(Command::ResetGarden)
+                    }else{None}
                 }
                 (QUIT_ID, BN_CLICKED) => {
                     ShowWindow(hwnd, SW_HIDE);
@@ -1099,7 +1218,7 @@ mod panel_tests {
             assert_eq!(GetDlgItem(hwnd, 1007), 0, "FPS legend must be removed");
             assert_eq!(
                 SendMessageW(GetDlgItem(hwnd, MODE_ID), CB_GETCOUNT, 0, 0),
-                1
+                2
             );
             assert_eq!(GetDlgItem(hwnd, 1001), 0, "pause checkbox must be removed");
             assert_eq!(
@@ -1201,6 +1320,19 @@ mod panel_tests {
                 mode,
             );
             assert!(matches!(rx.try_recv(), Ok(Command::Mode(ModelMode::Fish))));
+            SendMessageW(mode, CB_SETCURSEL, 1, 0);
+            SendMessageW(
+                hwnd,
+                WM_COMMAND,
+                MODE_ID as usize | ((CBN_SELCHANGE as usize) << 16),
+                mode,
+            );
+            assert!(matches!(rx.try_recv(), Ok(Command::Mode(ModelMode::Plant))));
+            assert_eq!(
+                GetWindowLongPtrW(GetDlgItem(hwnd, COUNT_ID), GWL_STYLE) & WS_VISIBLE as isize,
+                0
+            );
+
             SendMessageW(hwnd, WM_CLOSE, 0, 0);
             assert_ne!(
                 IsWindow(hwnd),
@@ -1211,6 +1343,16 @@ mod panel_tests {
                 rx.try_recv().is_err(),
                 "closing settings must not quit the app"
             );
+            crate::debug_options::configure(Some(3600));
+            SendMessageW(mode, CB_SETCURSEL, 1, 0);
+            refresh_time_slider(hwnd, &mut context);
+            assert_eq!(slider_time_scale(hwnd), 3600.0);
+            SendMessageW(time_slider, TBM_SETPOS, 0, 7);
+            SendMessageW(hwnd, WM_HSCROLL, TB_ENDTRACK as usize, time_slider);
+            assert!(matches!(rx.try_recv(),Ok(Command::TimeScale(value)) if value==86400.0));
+            SendMessageW(time_slider, TBM_SETPOS, 0, 0);
+            assert_eq!(slider_time_scale(hwnd), 0.0);
+            crate::debug_options::configure(None);
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
             DestroyWindow(hwnd);
             if context.font != 0 {
@@ -1244,6 +1386,7 @@ unsafe extern "system" fn enumerate_display(
             y: r.top,
             width: r.right - r.left,
             height: r.bottom - r.top,
+            work_bottom: info.monitorInfo.rcWork.bottom,
         });
     }
     1
