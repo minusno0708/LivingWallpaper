@@ -17,6 +17,7 @@ pub enum Command {
 #[derive(Default)]
 pub struct Environment {
     pub cursor: Option<Vec2>,
+    pub water_held: bool,
     pub battery: bool,
     pub suspended: bool,
     pub fullscreen: bool,

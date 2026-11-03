@@ -129,12 +129,18 @@ impl Garden {
         }
     }
     pub fn water(&mut self, region: &Region, x: f32, scene_dt: f64) {
+        self.water_radius(region, x, scene_dt, 30.0);
+    }
+    pub fn cloud_water(&mut self, region: &Region, x: f32, scene_dt: f64) {
+        self.water_radius(region, x, scene_dt, 60.0);
+    }
+    fn water_radius(&mut self, region: &Region, x: f32, scene_dt: f64, radius_px: f32) {
         if !scene_dt.is_finite() || scene_dt <= 0.0 {
             return;
         }
         let normalized =
             ((x - region.min.x) / (region.max.x - region.min.x).max(1.0)).clamp(0.0, 1.0);
-        let radius = (95.0 / (region.max.x - region.min.x).max(1.0)).clamp(0.03, 0.3);
+        let radius = (radius_px / (region.max.x - region.min.x).max(1.0)).min(1.0);
         for p in &mut self.plants {
             if p.display == region.id && (p.x - normalized).abs() < radius {
                 p.water = (p.water + scene_dt * 0.3).min(1.0);
@@ -147,7 +153,7 @@ impl Garden {
                 } else {
                     Kind::Grass
                 };
-                self.insert(&region.id, normalized + i as f32 * 0.018, kind, 1.0);
+                self.insert(&region.id, normalized + i as f32 * radius * 0.3, kind, 1.0);
             }
             self.insert(&region.id, normalized, Kind::Tree, 1.0);
             self.rain_cooldown = 1.0;
@@ -314,11 +320,51 @@ fn draw_seedling(out: &mut Vec<Vertex>, p: &Plant, r: &Region, time: f32) -> boo
     }
     true
 }
-fn rain_origin(region: &Region, cursor: Vec2) -> Vec2 {
-    Vec2::new(
-        cursor.x,
-        region.min.y + 48.0_f32.min((region.max.y - region.min.y) * 0.12),
-    )
+pub fn cloud_origin(region: &Region, elapsed: f64) -> Option<Vec2> {
+    let cycle = (elapsed / 240.0).floor() as u64;
+    let mut seed = region.id.bytes().fold(cycle.wrapping_add(37), |n, b| {
+        n.wrapping_mul(31).wrapping_add(b as u64)
+    });
+    seed = (seed ^ (seed >> 16)).wrapping_mul(0x85ebca6b);
+    let delay = 15.0 + (seed % 46) as f64;
+    let duration = 90.0 + ((seed >> 8) % 61) as f64;
+    let age = elapsed % 240.0 - delay;
+    if age < 0.0 || age >= duration {
+        return None;
+    }
+    let progress = (age / duration) as f32;
+    Some(Vec2::new(
+        region.min.x - 90.0 + progress * (region.max.x - region.min.x + 180.0),
+        region.min.y + 48.0 + ((seed >> 16) % 18) as f32,
+    ))
+}
+fn draw_rain(
+    out: &mut Vec<Vertex>,
+    region: &Region,
+    origin: Vec2,
+    time: f32,
+    radius: f32,
+    count: usize,
+) {
+    let ground = soil_y(
+        region,
+        (origin.x - region.min.x) / (region.max.x - region.min.x),
+    );
+    for i in 0..count {
+        let k = i as f32;
+        let phase = (time * 280.0 / (ground - origin.y).max(1.0) + k * 0.618).fract();
+        let x = origin.x + (k * 13.7).sin() * radius;
+        let y = origin.y + phase * (ground - origin.y).max(0.0);
+        if x >= region.min.x && x <= region.max.x && y < ground {
+            line(
+                out,
+                Vec2::new(x, y),
+                Vec2::new(x - 0.7, (y + 9.0).min(ground)),
+                0.55,
+                [0.3, 0.48, 0.53, 0.28],
+            );
+        }
+    }
 }
 fn soil_water(garden: &Garden, region: &Region, x: f32) -> f32 {
     garden
@@ -327,7 +373,7 @@ fn soil_water(garden: &Garden, region: &Region, x: f32) -> f32 {
         .filter(|p| p.display == region.id)
         .map(|p| {
             let distance = ((p.x - x) * (region.max.x - region.min.x)).abs();
-            let fade = (1.0 - distance / 95.0).clamp(0.0, 1.0);
+            let fade = (1.0 - distance / 40.0).clamp(0.0, 1.0);
             p.water as f32 * fade * fade * (3.0 - 2.0 * fade)
         })
         .fold(0.0, f32::max)
@@ -390,6 +436,19 @@ pub fn vertices(garden: &Garden, regions: &[Region], rain: Option<Vec2>) -> Vec<
                 1.5,
                 [0.2 - wet * 0.08, 0.34 - wet * 0.07, 0.22 + wet * 0.06, 1.0],
             );
+        }
+        // Ambient clouds drift independently from watering and cursor position.
+        if let Some(origin) = cloud_origin(r, garden.elapsed) {
+            draw_rain(&mut out, r, origin, time, 55.0, 45);
+            for i in 0..5 {
+                ellipse(
+                    &mut out,
+                    origin + Vec2::new((i as f32 - 2.0) * 18.0, -18.0 - (i % 2) as f32 * 5.0),
+                    Vec2::new(24.0, 13.0),
+                    0.0,
+                    [0.22, 0.34, 0.37, 0.22],
+                );
+            }
         }
         // Original simple green trees, with a fixed number of branches and crowns.
         for p in garden
@@ -512,32 +571,7 @@ pub fn vertices(garden: &Garden, regions: &[Region], rain: Option<Vec2>) -> Vec<
             }
         }
         if let Some(cursor) = rain.filter(|p| p.cmpge(r.min).all() && p.cmple(r.max).all()) {
-            let origin = rain_origin(r, cursor);
-            let ground = soil_y(r, (cursor.x - r.min.x) / (r.max.x - r.min.x));
-            for i in 0..70 {
-                let k = i as f32;
-                let phase = (time * 280.0 / (ground - origin.y).max(1.0) + k * 0.618).fract();
-                let x = cursor.x + (k * 13.7).sin() * 70.0;
-                let y = origin.y + phase * (ground - origin.y).max(0.0);
-                if x >= r.min.x && x <= r.max.x && y < ground {
-                    line(
-                        &mut out,
-                        Vec2::new(x, y),
-                        Vec2::new(x - 0.7, (y + 9.0).min(ground)),
-                        0.55,
-                        [0.3, 0.48, 0.53, 0.28],
-                    );
-                }
-            }
-            for i in 0..5 {
-                ellipse(
-                    &mut out,
-                    origin + Vec2::new((i as f32 - 2.0) * 18.0, -18.0 - (i % 2) as f32 * 5.0),
-                    Vec2::new(24.0, 13.0),
-                    0.0,
-                    [0.22, 0.34, 0.37, 0.8],
-                );
-            }
+            draw_rain(&mut out, r, cursor, time, 24.0, 30);
         }
     }
     out
@@ -553,12 +587,30 @@ mod tests {
         }
     }
     #[test]
-    fn rain_is_at_top_of_the_cursors_monitor_and_soil_tracks_moisture() {
+    fn clouds_drift_independently_and_soil_tracks_moisture() {
         let mut region = region();
         region.min.y = -500.0;
+        assert!(cloud_origin(&region, 0.0).is_none());
+        let start = cloud_origin(&region, 65.0).unwrap();
+        let later = cloud_origin(&region, 75.0).unwrap();
+        assert!(later.x > start.x);
+        assert_eq!(start.y, later.y);
+        assert!(
+            (0..240)
+                .filter(|t| cloud_origin(&region, *t as f64).is_some())
+                .count()
+                <= 150
+        );
         let cursor = Vec2::new(450.0, 300.0);
-        assert_eq!(rain_origin(&region, cursor), Vec2::new(450.0, -452.0));
-        assert_eq!(rain_origin(&region, Vec2::new(450.0, 0.0)).y, -452.0);
+        let geometry = vertices(&Garden::default(), &[region.clone()], Some(cursor));
+        let drops: Vec<_> = geometry
+            .iter()
+            .filter(|v| v.color == [0.3, 0.48, 0.53, 0.28])
+            .collect();
+        assert!(!drops.is_empty());
+        assert!(drops
+            .iter()
+            .all(|v| v.position[1] >= cursor.y - 0.55 && (v.position[0] - cursor.x).abs() < 25.0));
         let mut garden = Garden::default();
         assert_eq!(soil_water(&garden, &region, 0.45), 0.0);
         garden.water(&region, 450.0, 1.0);
@@ -568,6 +620,39 @@ mod tests {
         assert!(soil_color(wet)[0] < soil_color(0.0)[0]);
         garden.advance(8.0 * 3600.0, 1.0);
         assert_eq!(soil_water(&garden, &region, 0.45), 0.0);
+    }
+    #[test]
+    fn click_water_is_local_and_cloud_rain_has_a_wider_footprint() {
+        let r = region();
+        let mut g = Garden::default();
+        g.insert(&r.id, 0.52, Kind::Grass, 0.0);
+        g.insert(&r.id, 0.55, Kind::Grass, 0.0);
+        g.water(&r, 500.0, 1.0);
+        assert!(
+            g.plants
+                .iter()
+                .find(|p| (p.x - 0.52).abs() < 0.001)
+                .unwrap()
+                .water
+                > 0.0
+        );
+        assert_eq!(
+            g.plants
+                .iter()
+                .find(|p| (p.x - 0.55).abs() < 0.001)
+                .unwrap()
+                .water,
+            0.0
+        );
+        g.cloud_water(&r, 500.0, 1.0);
+        assert!(
+            g.plants
+                .iter()
+                .find(|p| (p.x - 0.55).abs() < 0.001)
+                .unwrap()
+                .water
+                > 0.0
+        );
     }
     #[test]
     fn germination_waits_one_minute_and_opens_cotyledons_before_true_leaves() {

@@ -28,3 +28,6 @@ Desktop.ini
 
 /plant-state.json
 /plant-state.json.tmp
+
+/plant-debug-state.json
+/plant-debug-state.json.tmp

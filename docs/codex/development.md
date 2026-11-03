@@ -107,3 +107,15 @@ Releaseのタグが指すコミットをWindows x64 MSVCで整形確認・テス
 アイコンはbuild.rsからassets/app.rcをコンパイルする。MSVCはWindows SDKのrc.exe、GNUはwindresを必要とする（WINDRESで指定可）。フォントとそのライセンス、ICOを取得済みのソースへ同梱し、実行時にダウンロードしない。
 
 READMEのassets/demo.gifは現行のsimulation.rs・fish.wgsl・background.wgslを使ったオフスクリーン描画を縮小・減色したもの。デスクトップや個人設定を含めない。背景・魚の表現を変更したときに更新し、生成条件・検証結果をvalidation.mdへ追記する。実壁紙・モニター統合の受入確認には使わない。
+
+
+## Plantの高速デバッグ
+
+通常のアプリを終了してから、次のように起動する。
+
+```powershell
+.\target\release\living-wallpaper.exe --plant-debug
+.\target\release\living-wallpaper.exe --plant-debug-speed 86400
+```
+
+--plant-debugは初期3600倍。Plantの時間スライダーで0・1・10・60・600・3600・21600・86400倍を選べる。通常の庭とは別のplant-debug-state.jsonを使う。水分の影響を除去する機能ではないので、成熟を確認するには雨で水分を補充する。通常の倍率制限・本番の庭は変更しない。

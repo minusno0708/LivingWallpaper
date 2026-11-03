@@ -2,6 +2,7 @@
     all(windows, not(debug_assertions), not(test)),
     windows_subsystem = "windows"
 )]
+mod debug_options;
 mod plant;
 mod platform;
 mod renderer;
@@ -66,6 +67,7 @@ fn create_model(mode: settings::ModelMode) -> Option<Box<dyn SchoolModel>> {
 fn run() -> anyhow::Result<()> {
     let _instance = platform::single_instance()?;
     let args: Vec<_> = std::env::args().collect();
+    debug_options::configure(debug_options::parse(&args)?);
     let preview = args.iter().any(|a| a == "--preview");
     let smoke = args.iter().any(|a| a == "--smoke-test");
     let event_loop = EventLoop::new()?;
@@ -97,8 +99,15 @@ fn run() -> anyhow::Result<()> {
     ));
     let (tx, rx) = mpsc::channel();
     let _tray = platform::start_tray(tx, settings.clone())?;
+    if debug_options::enabled() {
+        settings.lock().unwrap().mode = settings::ModelMode::Plant;
+    }
     let mut model = create_model(settings.lock().unwrap().mode);
-    let plant_path = plant::Garden::path();
+    let plant_path = if debug_options::enabled() {
+        plant::Garden::path().with_file_name("plant-debug-state.json")
+    } else {
+        plant::Garden::path()
+    };
     let mut garden = if preview {
         plant::Garden::default()
     } else {
@@ -106,8 +115,6 @@ fn run() -> anyhow::Result<()> {
             .context("Could not read plant-state.json; the saved garden was not overwritten")?
     };
     let mut garden_dirty = false;
-    let mut reset_pointer: Option<Vec2> = None;
-    let mut wait_after_reset = false;
     let mut last_growth = Instant::now();
     let mut last_plant_save = Instant::now();
     let mut pointer = Pointer::default();
@@ -138,8 +145,8 @@ fn run() -> anyhow::Result<()> {
             // the elapsed interval. Visibility and rendering pauses do not enter here.
             let previous=settings.lock().unwrap().clone();
             if previous.mode==settings::ModelMode::Plant {
-                garden.advance(now.duration_since(last_growth).as_secs_f64(),previous.time_scale);
-                garden_dirty |= previous.time_scale>0.0 && !garden.plants.is_empty();
+                garden.advance(now.duration_since(last_growth).as_secs_f64()*debug_options::effective_scale(&previous),1.0);
+                garden_dirty |= debug_options::effective_scale(&previous)>0.0 && !garden.plants.is_empty();
             }
             last_growth=now;
             if !preview && garden_dirty && last_plant_save.elapsed()>=Duration::from_secs(30) {
@@ -148,7 +155,7 @@ fn run() -> anyhow::Result<()> {
             }
             for command in rx.try_iter() {
                 use platform::Command::*; let mut s=settings.lock().unwrap();
-                match command { Mouse=>s.mouse=!s.mouse,Icons=>s.icons=!s.icons,Power=>s.power_saving=!s.power_saving,Count(n)=>s.fish_count=n,Fps(n)=>s.fps=n,TimeScale(value)=>s.time_scale=settings::normalize_time_scale(value),Monitor(id)=>{if s.disabled_displays.contains(&id) {s.disabled_displays.retain(|value| value!=&id);} else {s.disabled_displays.push(id);} if !preview {match platform::configure_displays(hwnd,&s.disabled_displays) {Ok(gaps)=>display_gaps=gaps,Err(e)=>log(e.to_string())}}},Mode(mode)=>{if s.mode!=mode {s.mode=mode;model=create_model(mode);}},ResetGarden=>{let result=if preview {garden=plant::Garden::default();Ok(())}else{garden.reset(&plant_path)};match result {Ok(())=>{garden_dirty=false;wait_after_reset=true;reset_pointer=None;},Err(e)=>log(format!("Garden reset failed: {e}"))}},Quit=>target.exit() }
+                match command { Mouse=>s.mouse=!s.mouse,Icons=>s.icons=!s.icons,Power=>s.power_saving=!s.power_saving,Count(n)=>s.fish_count=n,Fps(n)=>s.fps=n,TimeScale(value)=>{if debug_options::active(s.mode){debug_options::set_speed(value as u32);}else{s.time_scale=settings::normalize_time_scale(value);}},Monitor(id)=>{if s.disabled_displays.contains(&id) {s.disabled_displays.retain(|value| value!=&id);} else {s.disabled_displays.push(id);} if !preview {match platform::configure_displays(hwnd,&s.disabled_displays) {Ok(gaps)=>display_gaps=gaps,Err(e)=>log(e.to_string())}}},Mode(mode)=>{if s.mode!=mode {s.mode=mode;model=create_model(mode);}},ResetGarden=>{let result=if preview {garden=plant::Garden::default();Ok(())}else{garden.reset(&plant_path)};match result {Ok(())=>{garden_dirty=false;},Err(e)=>log(format!("Garden reset failed: {e}"))}},Quit=>target.exit() }
                 if let Err(e)=s.save() { log(format!("Settings save failed: {e}")); }
                 next_frame=now;
             }
@@ -166,7 +173,7 @@ fn run() -> anyhow::Result<()> {
             if now>=next_frame {
                 let size=window.inner_size(); let bounds=Vec2::new(size.width as f32,size.height as f32);
                 let env=platform::environment(hwnd);
-                let paused=(!preview && display_snapshot.iter().all(|d|s.disabled_displays.contains(&d.id))) || s.fps==0 || s.time_scale==0.0 || size.width==0 || size.height==0 || (s.power_saving && (env.suspended || (!preview && env.fullscreen)));
+                let paused=(!preview && display_snapshot.iter().all(|d|s.disabled_displays.contains(&d.id))) || s.fps==0 || debug_options::effective_scale(&s)==0.0 || size.width==0 || size.height==0 || (s.power_saving && (env.suspended || (!preview && env.fullscreen)));
                 let fps=if paused {2} else if s.power_saving && env.battery {s.fps.min(15)} else {s.fps};
                 let dt=now.duration_since(last_frame).as_secs_f32(); last_frame=now;
                 if let Some(cursor)=env.cursor {
@@ -197,14 +204,16 @@ fn run() -> anyhow::Result<()> {
                                 plant::Region {id:d.id.clone(),min,max:Vec2::new(min.x+d.width as f32,(d.work_bottom-top) as f32)}
                             }).collect()
                         };
-                        if wait_after_reset {
-                            if let Some(position)=reset_pointer {if pointer.position.distance(position)>4.0 {wait_after_reset=false;}}
-                            else {reset_pointer=Some(pointer.position);}
-                        }
-                        let rain=if !wait_after_reset && pointer.enabled {Some(pointer.position)}else{None};
+                        let rain=if env.water_held && pointer.enabled {Some(pointer.position)}else{None};
                         if let Some(cursor)=rain {
                             if let Some(region)=regions.iter().find(|r|cursor.cmpge(r.min).all()&&cursor.cmple(r.max).all()) {
-                                garden.water(region,cursor.x,dt as f64*s.time_scale as f64);
+                                garden.water(region,cursor.x,dt as f64*debug_options::effective_scale(&s));
+                                garden_dirty=true;
+                            }
+                        }
+                        for region in &regions {
+                            if let Some(cloud)=plant::cloud_origin(region,garden.elapsed).filter(|p| p.x>=region.min.x && p.x<=region.max.x) {
+                                garden.cloud_water(region,cloud.x,dt as f64*debug_options::effective_scale(&s));
                                 garden_dirty=true;
                             }
                         }

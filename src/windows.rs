@@ -19,7 +19,12 @@ use windows_sys::Win32::{
         Diagnostics::Debug::*, LibraryLoader::*, Memory::*, Power::*, RemoteDesktop::*,
         Threading::*,
     },
-    UI::{HiDpi::*, Input::KeyboardAndMouse::SetFocus, Shell::*, WindowsAndMessaging::*},
+    UI::{
+        HiDpi::*,
+        Input::KeyboardAndMouse::{GetAsyncKeyState, SetFocus, VK_LBUTTON},
+        Shell::*,
+        WindowsAndMessaging::*,
+    },
 };
 
 fn wide(s: &str) -> Vec<u16> {
@@ -252,7 +257,16 @@ static SLEEPING: AtomicBool = AtomicBool::new(false);
 pub fn environment(wallpaper: isize) -> Environment {
     unsafe {
         let mut p: POINT = zeroed();
+        let down = (GetAsyncKeyState(VK_LBUTTON as i32) as u16) & 0x8000 != 0;
+        let mut water_held = false;
         let cursor = if GetCursorPos(&mut p) != 0 {
+            let hit = WindowFromPoint(p);
+            let root = GetAncestor(hit, GA_ROOT);
+            let mut class = [0u16; 64];
+            GetClassNameW(root, class.as_mut_ptr(), 64);
+            let class = String::from_utf16_lossy(&class);
+            let class = class.trim_end_matches('\0');
+            water_held = down && (root == wallpaper || class == "Progman" || class == "WorkerW");
             ScreenToClient(wallpaper, &mut p);
             Some(Vec2::new(p.x as f32, p.y as f32))
         } else {
@@ -285,6 +299,7 @@ pub fn environment(wallpaper: isize) -> Environment {
         }
         Environment {
             cursor,
+            water_held,
             battery,
             fullscreen,
             suspended: LOCKED.load(Ordering::Relaxed) || SLEEPING.load(Ordering::Relaxed),
@@ -698,7 +713,7 @@ unsafe fn refresh_panel(hwnd: HWND, context: &mut TrayContext) {
         SendMessageW(slider, TBM_SETPAGESIZE, 0, page);
         SendMessageW(slider, TBM_SETPOS, 1, pos as isize);
     }
-    update_slider_labels(hwnd);
+    refresh_time_slider(hwnd, context);
 }
 unsafe fn slider_values(hwnd: HWND) -> (usize, u32) {
     let count =
@@ -707,8 +722,53 @@ unsafe fn slider_values(hwnd: HWND) -> (usize, u32) {
         .clamp(0, (FPS_CHOICES.len() - 1) as isize) as usize;
     (count, FPS_CHOICES[fps_index])
 }
+unsafe fn plant_debug_controls(hwnd: HWND) -> bool {
+    let index = SendMessageW(GetDlgItem(hwnd, MODE_ID), CB_GETCURSEL, 0, 0);
+    crate::debug_options::enabled() && ModelMode::ALL.get(index as usize) == Some(&ModelMode::Plant)
+}
+unsafe fn refresh_time_slider(hwnd: HWND, context: &mut TrayContext) {
+    let debug = plant_debug_controls(hwnd);
+    let value = if debug {
+        crate::debug_options::speed() as f32
+    } else {
+        context.settings.lock().unwrap().time_scale
+    };
+    let slider = GetDlgItem(hwnd, TIME_ID);
+    let max = if debug {
+        (crate::debug_options::SPEEDS.len() - 1) as isize
+    } else {
+        8
+    };
+    let position = if debug {
+        crate::debug_options::SPEEDS
+            .iter()
+            .position(|&v| v == value as u32)
+            .unwrap_or(1) as isize
+    } else {
+        (value * 4.0) as isize
+    };
+    SendMessageW(slider, TBM_SETRANGEMIN, 0, 0);
+    SendMessageW(slider, TBM_SETRANGEMAX, 0, max);
+    SendMessageW(slider, TBM_SETPOS, 1, position);
+    context.last_time_scale = value;
+    set_label_if_changed(
+        hwnd,
+        1008,
+        if debug {
+            "育成速度（デバッグ）"
+        } else {
+            "時間の速さ"
+        },
+    );
+    update_slider_labels(hwnd);
+}
 unsafe fn slider_time_scale(hwnd: HWND) -> f32 {
-    SendMessageW(GetDlgItem(hwnd, TIME_ID), TBM_GETPOS, 0, 0).clamp(0, 8) as f32 / 4.0
+    let index = SendMessageW(GetDlgItem(hwnd, TIME_ID), TBM_GETPOS, 0, 0);
+    if plant_debug_controls(hwnd) {
+        crate::debug_options::SPEEDS[index.clamp(0, 7) as usize] as f32
+    } else {
+        index.clamp(0, 8) as f32 / 4.0
+    }
 }
 unsafe fn set_label_if_changed(hwnd: HWND, id: i32, value: &str) {
     let child = GetDlgItem(hwnd, id);
@@ -723,7 +783,16 @@ unsafe fn update_slider_labels(hwnd: HWND) {
     let (count, fps) = slider_values(hwnd);
     set_label_if_changed(hwnd, 1045, &format!("{count}匹"));
     set_label_if_changed(hwnd, 1046, &format!("{fps} FPS"));
-    set_label_if_changed(hwnd, 1047, &format!("{:.2}×", slider_time_scale(hwnd)));
+    let value = slider_time_scale(hwnd);
+    set_label_if_changed(
+        hwnd,
+        1047,
+        &if plant_debug_controls(hwnd) {
+            format!("{value:.0}×")
+        } else {
+            format!("{value:.2}×")
+        },
+    );
 }
 unsafe fn show_panel(hwnd: HWND, context: &mut TrayContext) {
     refresh_panel(hwnd, context);
@@ -918,6 +987,7 @@ unsafe extern "system" fn tray_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) 
                             );
                         }
                     }
+                    refresh_time_slider(hwnd,context);
                     ModelMode::ALL
                         .get(index as usize)
                         .copied()
@@ -1273,6 +1343,16 @@ mod panel_tests {
                 rx.try_recv().is_err(),
                 "closing settings must not quit the app"
             );
+            crate::debug_options::configure(Some(3600));
+            SendMessageW(mode, CB_SETCURSEL, 1, 0);
+            refresh_time_slider(hwnd, &mut context);
+            assert_eq!(slider_time_scale(hwnd), 3600.0);
+            SendMessageW(time_slider, TBM_SETPOS, 0, 7);
+            SendMessageW(hwnd, WM_HSCROLL, TB_ENDTRACK as usize, time_slider);
+            assert!(matches!(rx.try_recv(),Ok(Command::TimeScale(value)) if value==86400.0));
+            SendMessageW(time_slider, TBM_SETPOS, 0, 0);
+            assert_eq!(slider_time_scale(hwnd), 0.0);
+            crate::debug_options::configure(None);
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
             DestroyWindow(hwnd);
             if context.font != 0 {
